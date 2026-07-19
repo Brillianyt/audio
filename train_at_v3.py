@@ -628,9 +628,7 @@ def train_v3(cfg, args):
             torch.save({"model": model.state_dict(), "auc_unseen": au_,
                         "auc_seen": as_, "epoch": ep},
                        os.path.join(out_dir, "best.pt"))
-        torch.save({"model": model.state_dict(), "auc_unseen": au_,
-                    "auc_seen": as_, "epoch": ep},
-                   os.path.join(out_dir, "latest.pt"))
+            print(f"  saved best.pt (unseen={au_:.4f})")
 
 
 # ═══════════ Main ═══════════
