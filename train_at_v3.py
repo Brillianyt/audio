@@ -26,7 +26,7 @@ class Config:
     lr: float = 3e-4
     batch_size: int = 256
     pos_weight: float = 5.0
-    cos_scale: float = 8.0
+    cos_scale: float = 2.0
     num_workers: int = 8
     seed: int = 42
     log_every: int = 50
@@ -273,6 +273,7 @@ class ComparisonHead(nn.Module):
 # ═══════════ Audio-Text Model ═══════════
 
 class AudioTextModel(nn.Module):
+    """Audio-Text model: cosine(et, eq) for text↔query matching."""
     def __init__(self, embed_dim=256, unfreeze=2, text_encoder="phoneme_bigru", lora_r=0):
         super().__init__()
         self.encoder = WhisperEncoder("base", embed_dim, unfreeze, lora_r)
@@ -280,15 +281,16 @@ class AudioTextModel(nn.Module):
             self.text_enc = CharTransformerEncoder(embed_dim)
         else:
             self.text_enc = PhonemeBiGRUEncoder(embed_dim)
-        self.compare = ComparisonHead(embed_dim)
-        # Learnable weight for enroll audio residual
-        self.alpha = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, e, texts):
+        """Return ae_cos(enroll_audio,enroll_text), ea, et for margin only."""
         ea = self.encoder(e)
         et, _ = self.text_enc(texts)
-        logit = self.compare(ea, et).squeeze(-1)
-        return logit, ea, et
+        return (et * ea).sum(-1), ea, et
+
+    def score(self, et, eq):
+        """Cosine(enroll_text, query_audio)."""
+        return (et * eq).sum(-1)
 
 
 # ═══════════ Deduplicated Data Loading ═══════════
@@ -453,15 +455,9 @@ def train_v3(cfg, args):
     if args.load_ckpt:
         ckpt = torch.load(args.load_ckpt, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"], strict=False)
-        print(f"  loaded full model from {args.load_ckpt}")
+        print(f"  loaded encoder from {args.load_ckpt}")
         if "auc_unseen" in ckpt:
-            best = ckpt["auc_unseen"]
-            print(f"    best unseen={best:.4f}")
-        # Reinitialize ComparisonHead — old ckpt was trained on wrong objective
-        if args.fresh_head:
-            model.compare = ComparisonHead(cfg.embed_dim).to(device)
-            model.alpha = nn.Parameter(torch.tensor(0.0, device=device))
-            print("  reinitialized ComparisonHead (fresh)")
+            print(f"    prev unseen={ckpt['auc_unseen']:.4f}")
 
     best, start_ep = -1.0, 1
     if args.resume:
@@ -542,19 +538,19 @@ def train_v3(cfg, args):
             q = q + nl * torch.randn_like(q) * q.std(-1, keepdim=True)
 
             with torch.cuda.amp.autocast():
-                ae_logit, ea, et = model(e, txts)
+                ae_cos, ea, et = model(e, txts)
                 scale = cfg.cos_scale
                 eq = model.encoder(q)
-                match_logit = model.compare(et, eq).squeeze(-1)
+                match_cos = model.score(et, eq)  # cosine(enroll_text, query_audio)
 
                 pos = (y == 1)
                 neg = (y == 0)
                 margin = 0.0
-                if pos.any(): margin += F.relu(0.6 - match_logit[pos]).mean()
-                if neg.any(): margin += F.relu(match_logit[neg] + 0.15).mean()
-                margin += F.relu(0.6 - ae_logit).mean()
+                if pos.any(): margin += F.relu(0.6 - match_cos[pos]).mean()
+                if neg.any(): margin += F.relu(match_cos[neg] + 0.15).mean()
+                margin += F.relu(0.6 - ae_cos).mean()
 
-                loss = crit(match_logit * scale, y) + 0.1 * margin
+                loss = crit(match_cos * scale, y) + 0.1 * margin
 
             opt.zero_grad()
             scaler.scale(loss).backward()
@@ -564,8 +560,8 @@ def train_v3(cfg, args):
             sched.step()
 
             total_loss += loss.item(); n_batches += 1
-            _cp = match_logit[pos].detach() if pos.any() else torch.tensor([0.0])
-            _cn = match_logit[neg].detach() if neg.any() else torch.tensor([0.0])
+            _cp = match_cos[pos].detach() if pos.any() else torch.tensor([0.0])
+            _cn = match_cos[neg].detach() if neg.any() else torch.tensor([0.0])
             cos_pos_sum += _cp.mean().item(); cos_neg_sum += _cn.mean().item(); cos_n += 1
             all_cos_pos.append(_cp.cpu()); all_cos_neg.append(_cn.cpu())
 
@@ -574,18 +570,18 @@ def train_v3(cfg, args):
                       f"cos+={cos_pos_sum/cos_n:.3f} cos-={cos_neg_sum/cos_n:.3f} "
                       f"gap={cos_pos_sum/cos_n - cos_neg_sum/cos_n:.3f}")
 
-        # ── Eval (ComparisonHead on enroll_text vs query_audio, same as training) ──
+        # ── Eval (cosine(enroll_text, query_audio), same as training) ──
         @torch.no_grad()
         def ev(ld):
             model.eval(); ps, ls, ids, all_cs = [], [], [], []
             for e, q, y, txts, id_ in ld:
                 e, q = e.to(device), q.to(device)
-                _, _, et = model(e, txts)  # text embedding from enroll
-                eq = model.encoder(q)       # audio embedding from query
-                logit = model.compare(et, eq).squeeze(-1)  # same as training target
-                ps.append(torch.sigmoid(logit * cfg.cos_scale).cpu().numpy())
+                _, _, et = model(e, txts)
+                eq = model.encoder(q)
+                cs = model.score(et, eq)  # cosine [-1,1]
+                ps.append(torch.sigmoid(cs * cfg.cos_scale).cpu().numpy())
                 ls.append(y.numpy()); ids.extend(id_)
-                all_cs.append(logit.cpu().numpy())
+                all_cs.append(cs.cpu().numpy())
             return roc_auc_score(np.concatenate(ls), np.concatenate(ps)), \
                    np.concatenate(ps), np.concatenate(ls), ids, np.concatenate(all_cs)
 
@@ -646,7 +642,6 @@ if __name__ == "__main__":
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--bs", type=int, default=256)
     p.add_argument("--unfreeze", type=int, default=4)
-    p.add_argument("--fresh-head", action="store_true", help="reinitialize ComparisonHead")
     p.add_argument("--resume", action="store_true")
     args = p.parse_args()
 
