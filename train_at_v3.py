@@ -210,7 +210,7 @@ class PhonemeBiGRUEncoder(nn.Module):
     def __init__(self, dim=256):
         super().__init__()
         self.emb = nn.Embedding(40, dim)
-        self.gru = nn.GRU(dim, dim, batch_first=True, bidirectional=True, num_layers=2, dropout=0.0)
+        self.gru = nn.GRU(dim, dim, batch_first=True, bidirectional=True, num_layers=4, dropout=0.1)
         self.proj = nn.Linear(dim*2, dim)
 
     def forward(self, texts):
