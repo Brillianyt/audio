@@ -440,7 +440,7 @@ def collate_text(batch):
 def train_v3(cfg, args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(cfg.seed); np.random.seed(cfg.seed)
-    out_dir = os.path.join(PATHS.root, "output", f"at_v5")
+    out_dir = os.path.join(PATHS.root, "output", f"at_v6")
     os.makedirs(out_dir, exist_ok=True)
 
     # ── Load and deduplicate data ──
@@ -457,6 +457,11 @@ def train_v3(cfg, args):
         if "auc_unseen" in ckpt:
             best = ckpt["auc_unseen"]
             print(f"    best unseen={best:.4f}")
+        # Reinitialize ComparisonHead — old ckpt was trained on wrong objective
+        if args.fresh_head:
+            model.compare = ComparisonHead(cfg.embed_dim).to(device)
+            model.alpha = nn.Parameter(torch.tensor(0.0, device=device))
+            print("  reinitialized ComparisonHead (fresh)")
 
     best, start_ep = -1.0, 1
     if args.resume:
@@ -640,9 +645,12 @@ if __name__ == "__main__":
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--bs", type=int, default=256)
+    p.add_argument("--unfreeze", type=int, default=4)
+    p.add_argument("--fresh-head", action="store_true", help="reinitialize ComparisonHead")
     p.add_argument("--resume", action="store_true")
     args = p.parse_args()
 
     cfg = Config(); cfg.__post_init__()
     cfg.epochs = args.epochs; cfg.lr = args.lr; cfg.batch_size = args.bs
+    cfg.unfreeze_layers = args.unfreeze
     train_v3(cfg, args)
