@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Model weights (too large for git, use LFS if needed)
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.msgpack
+
+# Audio/Video data
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.aac
+*.m4a
+*.mp4
+
+# Archives (too large)
+*.zip
+*.tar.gz
+*.tar
+*.tgz
+*.rar
+*.7z
+*.bz2
+*.gz
+
+# Datasets and large data
+train/
+datasets/
+musan_data/
+librispeech_data/
+backward/
+wavlm/
+whisper_models/
+hubert_models/
+
+# Training outputs (model weights)
+output/**/*.pt
+output/**/*.pth
+output/**/cos_dist.jsonl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Misc
+*.pid
+.train_err.log
+at_v4_pid.txt
+*.pt.*
