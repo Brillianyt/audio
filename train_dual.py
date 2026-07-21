@@ -25,7 +25,7 @@ class Config:
     whisper_model: str = "base"
     embed_dim: int = 256
     sample_rate: int = 16000
-    max_audio_sec: float = 1.5
+    max_audio_sec: float = 2.5  # padded audio: ~0.8s + 1s silence
     unfreeze_layers: int = 4
 
     epochs: int = 15
@@ -638,12 +638,12 @@ def train_text(cfg, args):
     else:
         def get_loader(ep):
             n_pos = min(100000, len(pos_pairs))
-            n_neg = min(400000, len(neg_pairs))
+            n_neg = min(200000, len(neg_pairs))
             subset = rng.choice(pos_pairs, n_pos, replace=False).tolist()
             subset += rng.choice(neg_pairs, n_neg, replace=False).tolist()
             np.random.shuffle(subset)
             ds = PairDataset(subset, cfg.train_zip, cfg, "text")
-            return DataLoader(ds, batch_size=512, shuffle=True,
+            return DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
                               num_workers=cfg.num_workers, collate_fn=collate_text,
                               pin_memory=True, drop_last=True)
 
