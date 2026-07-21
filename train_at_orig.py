@@ -201,8 +201,6 @@ def load_all_data(cfg):
     all_pairs = load_pairs(cfg.train_csv)
     # Original data: only hard_neg files that exist and have valid zips
     extra_files = [
-        "baseline/hard_neg_whisper.json", "baseline/hard_neg_iter1.json",
-        "baseline/hard_neg_iter2.json", "baseline/hard_neg_phoneme.json",
         "train/self_paired.json", "train/self_paired_xl.json",
         "train/fill_pos_pairs.json", "train/mega_pairs.json",
         "baseline/hard_neg_at_ohem.json",
@@ -218,7 +216,7 @@ def load_all_data(cfg):
     pos_pairs = [p for p in all_pairs if p["label"] == 1]
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
     pos_dedup = deduplicate_by_word_pair(pos_pairs, max_per_pair=30)
-    hard_neg_ids = {"hard_neg", "hn_", "hnat_", "phoneme"}
+    hard_neg_ids = {"hnat_"}
     hard_neg = [p for p in neg_pairs if any(k in p.get("id","") for k in hard_neg_ids)]
     hard_id_set = {p["id"] for p in hard_neg}
     easy_neg = [p for p in neg_pairs if p["id"] not in hard_id_set]
