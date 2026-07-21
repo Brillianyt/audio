@@ -487,11 +487,41 @@ AA 对 seen 词自信，AT 对 unseen 自信。各自不自信时对方的权重
 
 ### 关键经验
 
-1. **AA 路线不可行**：无论用什么编码器（Whisper/HuBERT/WavLM），纯声学比较对集外词泛化极差
-2. **AT 路线正确**：跨模态（文本+音频）比较泛化能力远强于纯声学
-3. **数据去重比扩量更重要**：唯一词对覆盖比总 pair 数关键
-4. **小 CharBiGRU 没意义**：从 256d→64d 再恢复 256d，性能没本质变化，关键在数据
+1. **AT 和 AA 解决不同问题，不能用同一套数据** — AT 是跨模态泛化（text↔audio），需要模型误判的 hard neg；AA 是纯声学匹配（audio↔audio），不需要负样本
+2. **AA 不需要负样本** — 不同词声学天然不匹配，只需学同词帧级对齐。BCE + 负样本反而引入噪声
+3. **AT 的 hard neg 必须来自模型实际误判** — 不是文本空间邻居，而是模型真正混淆的 pair。OHEM 逐对跑模型打分才能得到
+4. **数据去重比扩量更重要**：唯一词对覆盖比总 pair 数关键
 5. **不要占主进程**：所有后台任务用 CronCreate 定时检查，不用 sleep
+
+## 阶段性训练方案 (2026-07-21)
+
+### 第一阶段：AA 先跑通
+- 数据：原始 train.csv，只取 pos 对（同词不同音频）
+- 架构：WhisperFrameEncoder + FrameCrossAttention（可学习 DTW）
+- 损失：`relu(0.6 - score)` — margin loss，推到 0.6 以上
+- 目标：seen AUC 0.7+
+
+### 第二阶段：AT 用 OHEM 硬负样本
+- 数据：原始 pos + OHEM 模型误判 hard neg + hard pos
+- 关键：负样本全部来自模型真实 false positive，不是静态 embedding 邻居
+- 损失：BCE(cos × 2, y) + margin
+- 目标：unseen AUC 0.65+
+
+### 第三阶段：集成
+- AA 拿 seen（声学记忆），AT 拿 unseen（跨模态泛化）
+- 动态 gate：谁 confidence 高听谁的
+- `final = (conf_aa × p_aa + conf_at × p_at) / (conf_aa + conf_at)`
+
+### AT vs AA 本质差异
+
+| | AT | AA |
+|------|------|------|
+| 输入 | enroll_text ↔ query_audio | enroll_audio ↔ query_audio |
+| 核心能力 | 跨模态泛化（音素→声学） | 声学模式匹配 |
+| 需要什么数据 | 模型误判的 hard neg | 同词不同音频即可 |
+| 泛化 unseen | 强 | 弱 |
+| 记忆 seen | 一般 | 强 |
+| 集成角色 | unseen 专家 | seen 专家 |
 
 ## 模型诊断与修复 (2026-07-19)
 
