@@ -241,7 +241,9 @@ def train_aa_hybrid(cfg, args):
     model = AAHybridModel(cfg.embed_dim, unfreeze=cfg.unfreeze_layers).to(device)
     if args.load_ckpt:
         ckpt = torch.load(args.load_ckpt, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"], strict=False)
+        # Skip gate params if loading from v2 (different gate architecture)
+        state = {k: v for k, v in ckpt["model"].items() if not k.startswith("gate.")}
+        model.load_state_dict(state, strict=False)
         print(f"  loaded encoder from {args.load_ckpt}")
 
     best, start_ep = -1.0, 1
@@ -249,7 +251,8 @@ def train_aa_hybrid(cfg, args):
         for fp in [os.path.join(out_dir,"latest.pt"), os.path.join(out_dir,"best.pt")]:
             if os.path.isfile(fp):
                 ckpt = torch.load(fp, map_location=device, weights_only=False)
-                model.load_state_dict(ckpt["model"], strict=False)
+                state = {k: v for k, v in ckpt["model"].items() if not k.startswith("gate.")}
+                model.load_state_dict(state, strict=False)
                 best = ckpt.get("auc_unseen",-1); start_ep = ckpt.get("epoch",0)+1
                 print(f"  resumed ep{start_ep}"); break
 
