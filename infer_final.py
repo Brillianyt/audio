@@ -58,38 +58,52 @@ def read_wav(zf, pid, role):
 def run_inference(csv_path, zip_path, prefix, fusion_head):
     results = []
     zf = zipfile.ZipFile(zip_path, 'r')
+    
+    # Load all rows
+    rows = []
     with open(csv_path, encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            pid = row['id']
-            txt = row['enroll_txt'].lower()
-
-            # Read audio
-            e = read_wav(zf, pid, 'enroll').unsqueeze(0).to(device)
-            q = read_wav(zf, pid, 'query').unsqueeze(0).to(device)
-
-            # Pad to same length
-            ml = max(e.shape[-1], q.shape[-1])
-            if e.shape[-1] < ml: e = F.pad(e, (0, ml - e.shape[-1]))
-            if q.shape[-1] < ml: q = F.pad(q, (0, ml - q.shape[-1]))
-
-            with torch.no_grad():
-                # AA
-                score_aa, *_ = aa(e, q)
-                p_aa = torch.sigmoid(score_aa * 3.0)
-
-                # AT
-                _, _, et = at(e, [txt])
-                eq = at.encoder(q)
-                cs_at = (et * eq).sum(-1)
-                p_at = torch.sigmoid(cs_at * 8.0)
-
-                # Fusion
-                logit = fusion_head(p_aa, p_at)
-                posterior = torch.sigmoid(logit).item()
-
-            results.append((f'{prefix}_{pid}', posterior))
-
+        for row in csv.DictReader(f):
+            rows.append(row)
+    
+    # Batch process
+    batch_size = 64
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start:start+batch_size]
+        
+        # Read all audio for this batch
+        e_list, q_list, txt_list, pid_list = [], [], [], []
+        for row in batch:
+            pid = row['id']; txt = row['enroll_txt'].lower()
+            e = read_wav(zf, pid, 'enroll')
+            q = read_wav(zf, pid, 'query')
+            e_list.append(e); q_list.append(q); txt_list.append(txt); pid_list.append(pid)
+        
+        # Pad batch
+        ml = max(max(e.shape[-1], q.shape[-1]) for e,q in zip(e_list, q_list))
+        e_batch = torch.stack([F.pad(e, (0, ml-e.shape[-1])) if e.shape[-1]<ml else e for e in e_list]).to(device)
+        q_batch = torch.stack([F.pad(q, (0, ml-q.shape[-1])) if q.shape[-1]<ml else q for q in q_list]).to(device)
+        
+        with torch.no_grad():
+            score_aa, *_ = aa(e_batch, q_batch)
+            p_aa = torch.sigmoid(score_aa * 3.0).squeeze()
+            
+            _, _, et = at(e_batch, txt_list)
+            eq_at = at.encoder(q_batch)
+            cs_at = (et * eq_at).sum(-1)
+            p_at = torch.sigmoid(cs_at * 8.0).squeeze()
+            
+            logit = fusion_head(p_aa.unsqueeze(-1) if p_aa.dim()==1 else p_aa, p_at.unsqueeze(-1) if p_at.dim()==1 else p_at)
+            if logit.dim() > 0:
+                posteriors = torch.sigmoid(logit).cpu().tolist()
+            else:
+                posteriors = [torch.sigmoid(logit).item()]
+        
+        for pid, post in zip(pid_list, posteriors if isinstance(posteriors, list) else [posteriors]):
+            results.append((f'{prefix}_{pid}', post))
+        
+        if (start // batch_size) % 10 == 0:
+            print(f'  {prefix}: {start+len(batch)}/{len(rows)}')
+    
     zf.close()
     return results
 
