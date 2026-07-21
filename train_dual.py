@@ -792,8 +792,9 @@ def main():
     p.add_argument("--encoder", default="whisper", choices=["whisper","wavlm"])
     p.add_argument("--small-te", action="store_true", help="use 64d CharBiGRU")
     p.add_argument("--pk", action="store_true", help="use PK sampling (32×4 pos + 128 neg per batch)")
+    p.add_argument("--unfreeze", type=int, default=cfg.unfreeze_layers, help="unfreeze layers")
     args = p.parse_args()
-    cfg.epochs = args.epochs; cfg.lr = args.lr; cfg.batch_size = args.bs
+    cfg.epochs = args.epochs; cfg.lr = args.lr; cfg.batch_size = args.bs; cfg.unfreeze_layers = args.unfreeze
 
     if args.mode in ("audio","both"): train_audio(cfg, args)
     if args.mode in ("text","both"): train_text(cfg, args)
