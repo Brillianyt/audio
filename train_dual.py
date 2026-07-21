@@ -331,7 +331,9 @@ class PairDataset(Dataset):
         wav=wav.astype(np.float32)
         ms=int(self.cfg.max_audio_sec*16000)
         if len(wav)>ms: wav=wav[:ms]
-        return torch.from_numpy(wav).float()
+        wav=torch.from_numpy(wav).float()
+        pad=int(0.5*16000); wav=F.pad(wav,(pad,pad))
+        return wav
 
     def __getitem__(self, idx):
         p = self.pairs[idx]; pid = p["id"]
