@@ -99,7 +99,8 @@ def run_inference(csv_path, zip_path, prefix, fusion_head):
                 posteriors = [torch.sigmoid(logit).item()]
         
         for pid, post in zip(pid_list, posteriors if isinstance(posteriors, list) else [posteriors]):
-            results.append((f'{prefix}_{pid}', post))
+            short_id = pid.replace('pair_', '')  # pair_000001 → 000001
+            results.append((f'{prefix}_{short_id}', post))
         
         if (start // batch_size) % 10 == 0:
             print(f'  {prefix}: {start+len(batch)}/{len(rows)}')
@@ -128,7 +129,9 @@ with open(out_path, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(['id', 'posterior'])
     for pid, post in all_results:
-        writer.writerow([pid, f'{post:.6f}'])
+        if isinstance(post, (list, tuple)):
+            post = post[0] if len(post) > 0 else 0.5
+        writer.writerow([pid, f'{float(post):.6f}'])
 
 print(f'Saved {out_path} ({len(all_results)} rows)')
 

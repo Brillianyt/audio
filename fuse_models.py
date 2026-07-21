@@ -1,132 +1,143 @@
-"""Train small fusion head on frozen AT+AA — 5 features, tiny MLP."""
-import csv, json, os, sys, io, zipfile
-import numpy as np
-import torch, torch.nn as nn, torch.nn.functional as F
-import soundfile as sf
-from torch.utils.data import DataLoader, Dataset
+"""Train a fusion head to combine AA and AT predictions.
+Freeze both models, train only the fusion MLP on dev set.
+"""
+import torch, os, sys, numpy as np
+import torch.nn as nn, torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
+sys.path.insert(0,'baseline'); from config import PATHS
+from train_aa import AudioAudioModel
+from train_at_v3 import WhisperEncoder, ComparisonHead, PairDataset, load_pairs, collate_text
+import re, cmudict
+from torch.utils.data import DataLoader
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "baseline"))
-from config import PATHS
+device='cuda'
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-scale = 8.0
+# ── AT model with 2-layer GRU ──
+_cmu=cmudict.dict()
+def w2p(w):
+    w=w.lower().strip("'s\"-.,!?;:"); pl=_cmu.get(w)
+    return [re.sub(r'[0-2]$','',p) for p in pl[0]] if pl else []
+PV=['AA','AE','AH','AO','AW','AY','B','CH','D','DH','EH','ER','EY','F','G','HH','IH','IY','JH','K','L','M','N','NG','OW','OY','P','R','S','SH','T','TH','UH','UW','V','W','Y','Z','ZH','UNK']
+P2I={p:i for i,p in enumerate(PV)}; _pc={}
+def t2p(t):
+    if t not in _pc: ph=w2p(t); _pc[t]=[P2I.get(p,39) for p in ph] if ph else [39]
+    return _pc[t]
+class PhBG(nn.Module):
+    def __init__(self,d=256):
+        super().__init__(); self.emb=nn.Embedding(40,d)
+        self.gru=nn.GRU(d,d,batch_first=True,bidirectional=True,num_layers=2,dropout=0.1)
+        self.proj=nn.Linear(d*2,d)
+    def forward(self,texts):
+        dev=next(self.parameters()).device
+        if not texts: return torch.zeros(0,256,device=dev),None
+        ph=[t2p(t) for t in texts]; mx=max(len(p) for p in ph)
+        idx=torch.zeros(len(texts),mx,dtype=torch.long,device=dev)
+        for i,p in enumerate(ph):
+            for j,pid in enumerate(p[:mx]): idx[i,j]=pid
+        x=self.emb(idx); _,h=self.gru(x); h=torch.cat([h[-2],h[-1]],-1)
+        return F.normalize(self.proj(h),dim=-1),None
+class ATM(nn.Module):
+    def __init__(self,d=256,u=4):
+        super().__init__(); self.encoder=WhisperEncoder('base',d,u); self.text_enc=PhBG(d); self.compare=ComparisonHead(d)
+    def forward(self,e,txts,q=None):
+        ea=self.encoder(e); et,_=self.text_enc(txts); logit=self.compare(ea,et).squeeze(-1)
+        if q is not None: eq=self.encoder(q); return logit,ea,et,eq
+        return logit,ea,et
 
-from train_at_v3 import AudioTextModel as AT
-at = AT(256).to(device)
-ckpt = torch.load("output/backup/at_best.pt", map_location=device, weights_only=False)
-at.load_state_dict(ckpt["model"], strict=False)
-at.eval()
-for p in at.parameters(): p.requires_grad = False
-print(f"AT frozen: unseen={ckpt.get('auc_unseen',-1):.4f}")
-
-from train_aa_pk import AAPKModel as AA
-aa = AA(256).to(device)
-aa_ckpt = torch.load("output/aa_pk/aa_final.pt", map_location=device, weights_only=False)
-aa.load_state_dict(aa_ckpt["model"], strict=False)
-aa.eval()
-for p in aa.parameters(): p.requires_grad = False
-print(f"AA frozen: seen={aa_ckpt.get('auc_seen',-1):.4f}")
-
-class FeatDataset(Dataset):
-    def __init__(self, csv_path, zip_path):
-        self.rows = [r for r in csv.DictReader(open(csv_path))]
-        self.zip = zipfile.ZipFile(zip_path, "r")
-    def __len__(self): return len(self.rows)
-    def __getitem__(self, idx):
-        r = self.rows[idx]
-        pid = r["id"]; txt = r.get("enroll_txt","").lower(); label = float(r.get("label",0))
-        e = self._read(f"wav/{pid}_enroll.wav")
-        if e is None: e = self._read(f"wav/{pid}.wav")
-        q = self._read(f"wav/{pid}_query.wav")
-        if q is None: q = self._read(f"wav/{pid}.wav")
-        return e, q, txt, label, pid
-    def _read(self, name):
-        try: data = self.zip.read(name)
-        except: return None
-        wav, sr = sf.read(io.BytesIO(data), dtype="float32", always_2d=False)
-        if wav.ndim > 1: wav = wav.mean(1)
-        if sr != 16000:
-            import torchaudio
-            wav = torchaudio.functional.resample(torch.from_numpy(wav).unsqueeze(0), sr, 16000).squeeze(0).numpy()
-        ms = int(1.5 * 16000)
-        if len(wav) > ms: wav = wav[:ms]
-        return torch.from_numpy(wav).float()
-
-def collate(batch):
-    ml = max(max(b[0].shape[-1], b[1].shape[-1]) for b in batch)
-    es, qs, txts, ls, ids = [], [], [], [], []
-    for b in batch:
-        e, q = b[0], b[1]
-        es.append(F.pad(e, (0, ml - e.shape[-1])) if e.shape[-1] < ml else e)
-        qs.append(F.pad(q, (0, ml - q.shape[-1])) if q.shape[-1] < ml else q)
-        txts.append(b[2]); ls.append(b[3]); ids.append(b[4])
-    return torch.stack(es), torch.stack(qs), txts, torch.tensor(ls, dtype=torch.float32), ids
-
-@torch.no_grad()
-def extract(ld):
-    feats, labels = [], []
-    for e, q, txts, y, _ in ld:
-        e, q = e.to(device), q.to(device)
-        _, _, et = at(e, txts)
-        at_prob = torch.sigmoid((et * at.encoder(q)).sum(-1) * scale)
-        ae = aa(e)[0]; qe = aa(q)[0]
-        aa_prob = torch.sigmoid((ae * qe).sum(-1) * scale)
-        at_align = torch.sigmoid((et * at.encoder(e)).sum(-1) * scale)
-        for i in range(len(y)):
-            feats.append([at_prob[i].item(), aa_prob[i].item(),
-                          abs(at_prob[i].item()-0.5), abs(aa_prob[i].item()-0.5),
-                          at_align[i].item()])
-            labels.append(y[i].item())
-    return np.array(feats), np.array(labels)
-
+# ── Fusion model ──
 class FusionHead(nn.Module):
-    def __init__(self, dim=5):
+    """Learn to combine AA and AT predictions."""
+    def __init__(self):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(dim, 8), nn.ReLU(), nn.Linear(8, 1))
-    def forward(self, x): return self.net(x).squeeze(-1)
+        self.net = nn.Sequential(
+            nn.Linear(5, 16), nn.ReLU(),
+            nn.Linear(16, 1),
+        )
+    def forward(self, p_aa, p_at):
+        conf_aa = (p_aa - 0.5).abs() * 2
+        conf_at = (p_at - 0.5).abs() * 2
+        gap = p_aa - p_at
+        features = torch.stack([p_aa, p_at, conf_aa, conf_at, gap], dim=-1)
+        return self.net(features).squeeze(-1)
 
-print("\nExtracting features...")
-all_X, all_y = [], []
-for subset in ["seen", "unseen"]:
-    csv_p = getattr(PATHS, f"dev_{subset}_csv")
-    zip_p = getattr(PATHS, f"dev_{subset}_zip")
-    ds = FeatDataset(csv_p, zip_p)
-    dl = DataLoader(ds, batch_size=256, num_workers=0, collate_fn=collate)
-    X, y = extract(dl)
-    all_X.append(X); all_y.append(y)
-    print(f"  {subset}: {len(X)}")
+cfg=type('C',(),{})(); cfg.max_audio_sec=1.5
 
-X = np.concatenate(all_X); y = np.concatenate(all_y)
-idx = np.random.RandomState(42).permutation(len(X))
-sp = int(0.8 * len(X))
-Xt, yt = X[idx[:sp]], y[idx[:sp]]
-Xv, yv = X[idx[sp:]], y[idx[sp:]]
+# Load frozen models
+aa=AudioAudioModel(256,unfreeze=2).to(device)
+aa.load_state_dict(torch.load('output/aa_v5/best.pt',map_location=device,weights_only=False)['model'],strict=False)
+for p in aa.parameters(): p.requires_grad=False; aa.eval()
 
-fh = FusionHead().to(device)
-opt = torch.optim.Adam(fh.parameters(), lr=1e-2)
-best_auc = 0.0
+at=ATM(256,4).to(device)
+at.load_state_dict(torch.load('output/backup/at_best.pt',map_location=device,weights_only=False)['model'],strict=False)
+for p in at.parameters(): p.requires_grad=False; at.eval()
 
-print(f"\nTraining fusion head ({len(Xt)} train, {len(Xv)} val)...")
-for ep in range(30):
-    perm = np.random.permutation(len(Xt))
-    for i in range(0, len(perm), 256):
-        b = perm[i:i+256]
-        x = torch.from_numpy(Xt[b]).float().to(device)
-        logit = fh(x)
-        loss = F.binary_cross_entropy_with_logits(logit, torch.from_numpy(yt[b]).float().to(device))
-        opt.zero_grad(); loss.backward(); opt.step()
+# ── Extract predictions for both dev sets ──
+def extract_preds(csv_f, zip_f):
+    loader=DataLoader(PairDataset(load_pairs(csv_f),zip_f,cfg),batch_size=128,collate_fn=collate_text,shuffle=False,num_workers=0)
+    ps_aa,ps_at,ls=[],[],[]
     with torch.no_grad():
-        preds = torch.sigmoid(fh(torch.from_numpy(Xv).float().to(device))).cpu().numpy()
-        auc = roc_auc_score(yv, preds)
-        if auc > best_auc:
-            best_auc = auc; torch.save(fh.state_dict(), "output/fusion_head.pt")
-    if (ep+1)%10==0: print(f"  ep{ep+1}: val AUC={auc:.4f} (best={best_auc:.4f})")
+        for e,q,y,txts,_ in loader:
+            e,q=e.to(device),q.to(device)
+            cs_aa,_,_=aa(e,q); p_aa=torch.sigmoid(cs_aa*8.0)
+            _,_,et=at(e,txts); eq_at=at.encoder(q); cs_at=(et*eq_at).sum(-1); p_at=torch.sigmoid(cs_at*8.0)
+            ps_aa.append(p_aa.cpu()); ps_at.append(p_at.cpu())
+            ls.append(y)
+    return torch.cat(ps_aa), torch.cat(ps_at), torch.cat(ls)
 
-fh.load_state_dict(torch.load("output/fusion_head.pt"))
-fh.eval()
-with torch.no_grad():
-    all_preds = torch.sigmoid(fh(torch.from_numpy(X).float().to(device))).cpu().numpy()
-print(f"\nFusion dev AUC: {roc_auc_score(y, all_preds):.4f}")
-print(f"AT only dev AUC: {roc_auc_score(y, X[:,0]):.4f}")
-print(f"AA only dev AUC: {roc_auc_score(y, X[:,1]):.4f}")
+print("Extracting predictions...")
+pa_s, pt_s, ls_s = extract_preds(PATHS.dev_seen_csv, PATHS.dev_seen_zip)
+pa_u, pt_u, ls_u = extract_preds(PATHS.dev_unseen_csv, PATHS.dev_unseen_zip)
+
+# Combine both sets for training
+pa = torch.cat([pa_s, pa_u]); pt = torch.cat([pt_s, pt_u]); ls = torch.cat([ls_s, ls_u])
+print(f"Total dev samples: {len(ls)}")
+
+# ── Train fusion head ──
+fusion = FusionHead().to(device)
+opt = torch.optim.Adam(fusion.parameters(), lr=0.01, weight_decay=1e-4)
+crit = nn.BCEWithLogitsLoss()
+
+# Train
+indices = torch.randperm(len(ls))
+split = int(0.8 * len(ls))
+tr_idx, val_idx = indices[:split], indices[split:]
+
+best_auc = 0
+for ep in range(100):
+    fusion.train()
+    idx = tr_idx[torch.randperm(len(tr_idx))]
+    for i in range(0, len(idx), 256):
+        b = idx[i:i+256]
+        logit = fusion(pa[b].to(device), pt[b].to(device))
+        loss = crit(logit, ls[b].float().to(device))
+        opt.zero_grad(); loss.backward(); opt.step()
+
+    # Eval
+    fusion.eval()
+    with torch.no_grad():
+        logit_val = fusion(pa[val_idx].to(device), pt[val_idx].to(device))
+        prob_val = torch.sigmoid(logit_val).cpu().numpy()
+    auc_val = roc_auc_score(ls[val_idx].numpy(), prob_val)
+
+    if auc_val > best_auc:
+        best_auc = auc_val
+        best_state = {k:v.cpu().clone() for k,v in fusion.state_dict().items()}
+
+    if ep % 20 == 0:
+        print(f"  ep{ep}: loss={loss.item():.4f} val_auc={auc_val:.4f}")
+
+# ── Final eval ──
+fusion.load_state_dict(best_state); fusion.eval()
+for name, pa_sub, pt_sub, ls_sub in [
+    ('seen', pa_s, pt_s, ls_s),
+    ('unseen', pa_u, pt_u, ls_u),
+    ('both', pa, pt, ls),
+]:
+    with torch.no_grad():
+        prob = torch.sigmoid(fusion(pa_sub.to(device), pt_sub.to(device))).cpu().numpy()
+    auc = roc_auc_score(ls_sub.numpy(), prob)
+    print(f"  Fusion {name}: AUC={auc:.4f}")
+
+# Save
+torch.save({'model': best_state, 'auc': best_auc}, 'output/fusion_head.pt')
+print(f"Saved fusion_head.pt (val_auc={best_auc:.4f})")
