@@ -235,8 +235,11 @@ def train_aa_cross(cfg, args):
     model = AACrossModel(cfg.embed_dim, unfreeze=cfg.unfreeze_layers).to(device)
     if args.load_ckpt:
         ckpt = torch.load(args.load_ckpt, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"], strict=False)
-        print(f"  loaded encoder from {args.load_ckpt}")
+        # Filter out incompatible keys (old model has ASP pooling, new model outputs frames)
+        state = {k: v for k, v in ckpt["model"].items()
+                 if not k.startswith("encoder.proj") and not k.startswith("encoder.attn_")}
+        model.load_state_dict(state, strict=False)
+        print(f"  loaded encoder from {args.load_ckpt} (skipped proj/attn)")
 
     best, start_ep = -1.0, 1
     tr = sum(p.numel() for p in model.parameters() if p.requires_grad)
