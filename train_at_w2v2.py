@@ -263,18 +263,32 @@ def train(cfg, args):
     dv_s = dev_ld(cfg.dev_seen_zip, cfg.dev_seen_csv)
     dv_u = dev_ld(cfg.dev_unseen_zip, cfg.dev_unseen_csv)
 
-    for ep in range(start_ep, cfg.epochs+1):
-        n_pos_ep = min(60000, len(pos_pairs))
-        n_neg_ep = min(80000, len(neg_pairs))
-        idx_pos = np.random.permutation(len(pos_pairs))[:n_pos_ep]
-        idx_neg = np.random.choice(len(neg_pairs), n_neg_ep, replace=True)
-        subset = [pos_pairs[i] for i in idx_pos] + [neg_pairs[i] for i in idx_neg]
-        np.random.shuffle(subset)
+    # Build PK word index
+    from collections import defaultdict
+    word_to_idx = defaultdict(list)
+    for i, p in enumerate(pos_pairs):
+        word_to_idx[p["enroll_txt"].lower()].append(i)
+    valid_words = [w for w, idxs in word_to_idx.items() if len(idxs) >= 2]
+    rng = np.random.default_rng(cfg.seed)
+    print(f"  PK: {len(valid_words)} words")
 
-        loader = DataLoader(PairDataset(subset, cfg.train_zip, cfg), batch_size=cfg.batch_size,
-                            shuffle=True, num_workers=cfg.num_workers, collate_fn=collate_text,
+    for ep in range(start_ep, cfg.epochs+1):
+        P, K, B = 32, 4, cfg.batch_size
+        subset = []
+        for _ in range(50):
+            words = list(rng.choice(valid_words, P, replace=False))
+            for w in words:
+                chosen = list(rng.choice(word_to_idx[w], K, replace=False))
+                subset += [pos_pairs[i] for i in chosen]
+        n_neg = max(len(subset), 128)
+        neg_idx = rng.choice(len(neg_pairs), n_neg, replace=True)
+        subset += [neg_pairs[i] for i in neg_idx]
+        rng.shuffle(subset)
+
+        loader = DataLoader(PairDataset(subset, cfg.train_zip, cfg), batch_size=B,
+                            shuffle=True, num_workers=0, collate_fn=collate_text,
                             pin_memory=True, drop_last=True)
-        print(f"[ep{ep}] train={len(subset)} pos={n_pos_ep} neg={n_neg_ep}")
+        print(f"[ep{ep}] PK train={len(subset)} pos={(P*K*50)} neg={n_neg}")
 
         model.train(); ts = time.time(); tl = 0; nb = 0; cp = 0; cn = 0; cn_ = 0
         for e, q, y, txts, _ in loader:
