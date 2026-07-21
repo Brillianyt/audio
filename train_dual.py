@@ -610,16 +610,42 @@ def train_text(cfg, args):
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
     print(f"  pos={len(pos_pairs)} neg={len(neg_pairs)}")
 
-    def get_loader(ep):
-        n_pos = min(30000, len(pos_pairs))
-        n_neg = min(50000, len(neg_pairs))
-        subset = rng.choice(pos_pairs, n_pos, replace=False).tolist()
-        subset += rng.choice(neg_pairs, n_neg, replace=False).tolist()
-        np.random.shuffle(subset)
-        ds = PairDataset(subset, cfg.train_zip, cfg, "text")
-        return DataLoader(ds, batch_size=512, shuffle=True,
-                          num_workers=0, collate_fn=collate_text,
-                          pin_memory=True, drop_last=True)
+	if args.small_te and args.pk:
+	    # PK sampling: P words × K pos pairs per batch, plus neg pairs
+	    from collections import defaultdict
+	    word_to_idx = defaultdict(list)
+	    for i, p in enumerate(pos_pairs):
+	        word_to_idx[p["enroll_txt"].lower()].append(i)
+	    valid_words = [w for w, idxs in word_to_idx.items() if len(idxs) >= 2]
+	    print(f"  PK: {len(valid_words)} words with ≥2 pos pairs")
+
+	    def get_loader(ep):
+	        P, K, B = 32, 4, 256  # P*K = 128 pairs per batch, 2 batches
+	        np.random.seed(cfg.seed + ep)
+	        subset, n_neg_pk = [], 128
+	        # PK pos pairs
+	        words = list(np.random.choice(valid_words, P, replace=False))
+	        for w in words:
+	            chosen = list(np.random.choice(word_to_idx[w], K, replace=False))
+	            subset += [pos_pairs[i] for i in chosen]
+	        # Also add random neg pairs
+	        neg_idx = np.random.choice(len(neg_pairs), n_neg_pk, replace=True)
+	        subset += [neg_pairs[i] for i in neg_idx]
+	        np.random.shuffle(subset)
+	        ds = PairDataset(subset, cfg.train_zip, cfg, "text")
+	        return DataLoader(ds, batch_size=B, shuffle=True, num_workers=0,
+	                          collate_fn=collate_text, pin_memory=True, drop_last=True)
+	else:
+	    def get_loader(ep):
+	        n_pos = min(30000, len(pos_pairs))
+	        n_neg = min(50000, len(neg_pairs))
+	        subset = rng.choice(pos_pairs, n_pos, replace=False).tolist()
+	        subset += rng.choice(neg_pairs, n_neg, replace=False).tolist()
+	        np.random.shuffle(subset)
+	        ds = PairDataset(subset, cfg.train_zip, cfg, "text")
+	        return DataLoader(ds, batch_size=512, shuffle=True,
+	                          num_workers=0, collate_fn=collate_text,
+	                          pin_memory=True, drop_last=True)
 
     def dev_ld(z,c):
         return DataLoader(PairDataset(load_pairs(c),z,cfg,"text"),
@@ -765,6 +791,7 @@ def main():
     p.add_argument("--resume", action="store_true")
     p.add_argument("--encoder", default="whisper", choices=["whisper","wavlm"])
     p.add_argument("--small-te", action="store_true", help="use 64d CharBiGRU")
+    p.add_argument("--pk", action="store_true", help="use PK sampling (32×4 pos + 128 neg per batch)")
     args = p.parse_args()
     cfg.epochs = args.epochs; cfg.lr = args.lr; cfg.batch_size = args.bs
 
