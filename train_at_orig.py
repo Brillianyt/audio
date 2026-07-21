@@ -205,6 +205,7 @@ def load_all_data(cfg):
         "baseline/hard_neg_iter2.json", "baseline/hard_neg_phoneme.json",
         "train/self_paired.json", "train/self_paired_xl.json",
         "train/fill_pos_pairs.json", "train/mega_pairs.json",
+        "baseline/hard_neg_at_ohem.json",
     ]
     for fn in extra_files:
         fp = os.path.join(PATHS.root, fn)
@@ -217,7 +218,7 @@ def load_all_data(cfg):
     pos_pairs = [p for p in all_pairs if p["label"] == 1]
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
     pos_dedup = deduplicate_by_word_pair(pos_pairs, max_per_pair=30)
-    hard_neg_ids = {"hard_neg", "hn_", "phoneme"}
+    hard_neg_ids = {"hard_neg", "hn_", "hnat_", "phoneme"}
     hard_neg = [p for p in neg_pairs if any(k in p.get("id","") for k in hard_neg_ids)]
     hard_id_set = {p["id"] for p in hard_neg}
     easy_neg = [p for p in neg_pairs if p["id"] not in hard_id_set]
@@ -256,10 +257,17 @@ class PairDataset(Dataset):
     def __getitem__(self, idx):
         p = self.pairs[idx]; pid = p["id"]
         eid = p.get("enroll_id", pid); qid = p.get("query_id", pid)
+        is_ohem = p.get("type","") == "at_ohem_fp"
+        if is_ohem:
+            real_aid = p.get("query_aid", qid)
+            eid = real_aid; qid = real_aid
+            txt = p.get("query_txt", "").lower()
+        else:
+            txt = p.get("enroll_txt", "").lower()
         zf = self._get_zip_for(p)
         e = self._read_wav(eid, "enroll", zf)
         q = self._read_wav(qid, "query", zf)
-        return e, q, float(p.get("label", 0)), p.get("enroll_txt", "").lower(), pid
+        return e, q, float(p.get("label", 0)), txt, pid
 
 def collate_text(batch):
     ml = max(max(b[0].shape[-1], b[1].shape[-1]) for b in batch)
