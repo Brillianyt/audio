@@ -644,7 +644,7 @@ def train_text(cfg, args):
             np.random.shuffle(subset)
             ds = PairDataset(subset, cfg.train_zip, cfg, "text")
             return DataLoader(ds, batch_size=512, shuffle=True,
-                              num_workers=0, collate_fn=collate_text,
+                              num_workers=cfg.num_workers, collate_fn=collate_text,
                               pin_memory=True, drop_last=True)
 
     def dev_ld(z,c):
