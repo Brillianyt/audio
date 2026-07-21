@@ -36,43 +36,35 @@ class Config:
             setattr(self, f"{k}_zip", z); setattr(self, f"{k}_csv", c)
 
 
-# ═══════════ Wav2Vec2 Audio Encoder ═══════════
-class W2V2Encoder(nn.Module):
+# ═══════════ Wav2Vec2 Frame Encoder (no pooling) ═══════════
+class W2V2FrameEncoder(nn.Module):
+    """Outputs frame features (B, T, D) instead of pooled embedding."""
     def __init__(self, model_name="facebook/wav2vec2-base", embed_dim=256, unfreeze=2):
         super().__init__()
         self.w2v2 = Wav2Vec2Model.from_pretrained(model_name)
         self.w2v2.eval()
         self.dim = self.w2v2.config.hidden_size
-        self.max_audio_sec = 2.5  # e.g. 768 for base
-        # Freeze feature extractor
+        self.max_audio_sec = 2.5
         self.w2v2.feature_extractor.requires_grad_(False)
-        # Freeze/unfreeze transformer layers
         total = len(self.w2v2.encoder.layers)
         self.frozen = max(0, total - unfreeze)
         for i, layer in enumerate(self.w2v2.encoder.layers):
             for p in layer.parameters():
                 p.requires_grad = i >= self.frozen
-        self.w2v2.project_hid.requires_grad_(True) if hasattr(self.w2v2, 'project_hid') else None
-        # ASP pooling
-        self.attn_l = nn.Linear(self.dim, self.dim // 4)
-        self.attn_w = nn.Parameter(torch.randn(self.dim // 4, 1))
-        self.proj = nn.Linear(self.dim * 2, embed_dim)
+        self.proj = nn.Linear(self.dim, embed_dim)
 
     def forward(self, wav):
         wav = wav.to(next(self.w2v2.parameters()).device)
-        ms = int(self.max_audio_sec * 16000) if hasattr(self, 'max_audio_sec') else int(Config.max_audio_sec * 16000)
+        ms = int(self.max_audio_sec * 16000)
         if wav.shape[-1] > ms: wav = wav[:, :ms]
         out = self.w2v2(wav, output_hidden_states=False)
         x = out.last_hidden_state  # (B, T, dim)
-        h = torch.tanh(self.attn_l(x))
-        aw = F.softmax(h @ self.attn_w, dim=1)
-        mu = (x * aw).sum(1)
-        sg = ((x ** 2 * aw).sum(1) - mu ** 2).clamp(1e-5).sqrt()
-        return F.normalize(self.proj(torch.cat([mu, sg], -1)), dim=-1)
+        return F.normalize(self.proj(x), dim=-1)  # (B, T, embed_dim)
 
 
-# ═══════════ CharBiGRU64 Text Encoder ═══════════
-class CharBiGRU64(nn.Module):
+# ═══════════ CharBiGRU64 Token Encoder (per-token, no pooling) ═══════════
+class CharBiGRUTokens(nn.Module):
+    """Outputs per-character features (B, L, D) with mask."""
     def __init__(self, dim=256):
         super().__init__()
         self.char_emb = nn.Embedding(28, 64)
@@ -81,31 +73,83 @@ class CharBiGRU64(nn.Module):
 
     def forward(self, texts):
         dev = next(self.parameters()).device
-        if not texts: return torch.zeros(0, 256, device=dev)
+        if not texts: return torch.zeros(0, 0, 256, device=dev), torch.zeros(0, 0, dtype=torch.bool, device=dev)
         mx = max(len(t) for t in texts)
         idx = torch.zeros(len(texts), mx, dtype=torch.long, device=dev)
+        mask = torch.zeros(len(texts), mx, dtype=torch.bool, device=dev)
         for i, t in enumerate(texts):
             for j, c in enumerate(t[:mx]):
                 idx[i, j] = max(0, min(27, ord(c) - 97))
+                mask[i, j] = True
         x = self.char_emb(idx)
-        _, h = self.gru(x)
-        h = torch.cat([h[-2], h[-1]], -1)
-        return F.normalize(self.proj(h), dim=-1)
+        out, _ = self.gru(x)  # (B, L, 128)
+        return F.normalize(self.proj(out), dim=-1), mask  # (B, L, D), (B, L)
+
+
+# ═══════════ Cross-Attention Aligner ═══════════
+class CrossAttnAligner(nn.Module):
+    """Text tokens (Q) attend to audio frames (K,V) → alignment score."""
+    def __init__(self, embed_dim=256, n_heads=4):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = embed_dim // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.compare = nn.Sequential(
+            nn.Linear(embed_dim * 4, embed_dim), nn.ReLU(),
+            nn.Linear(embed_dim, 1),
+        )
+
+    def forward(self, text_tokens, audio_frames, txt_mask=None):
+        """
+        text_tokens: (B, L, D)
+        audio_frames: (B, T, D)
+        txt_mask: (B, L) optional
+        Returns: alignment score (B,)
+        """
+        B, L, D = text_tokens.shape
+        _, T, _ = audio_frames.shape
+        
+        Q = self.q_proj(text_tokens).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        K = self.k_proj(audio_frames).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        V = self.v_proj(audio_frames).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        
+        attn = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        if txt_mask is not None:
+            attn = attn.masked_fill(~txt_mask[:, None, :, None], -1e9)
+        attn = F.softmax(attn, dim=-1)
+        
+        context = torch.matmul(attn, V).transpose(1, 2).contiguous().view(B, L, D)
+        context = F.normalize(context, dim=-1)
+        
+        # Rich per-token comparison: [tokens, context, diff, product]
+        feat = torch.cat([text_tokens, context, text_tokens - context, text_tokens * context], dim=-1)
+        token_scores = self.compare(feat).squeeze(-1)  # (B, L)
+        
+        # Top-k mean over tokens: robust alignment
+        k = max(1, L // 2)
+        score = token_scores.topk(k, dim=-1).values.mean(-1)
+        return score
 
 
 # ═══════════ Model ═══════════
 class W2V2ATModel(nn.Module):
     def __init__(self, embed_dim=256, unfreeze=2):
         super().__init__()
-        self.encoder = W2V2Encoder("facebook/wav2vec2-base", embed_dim, unfreeze)
-        self.text_enc = CharBiGRU64(embed_dim)
+        self.encoder = W2V2FrameEncoder("facebook/wav2vec2-base", embed_dim, unfreeze)
+        self.text_enc = CharBiGRUTokens(embed_dim)
+        self.aligner = CrossAttnAligner(embed_dim)
 
     def forward(self, enroll, texts, query):
-        ea = self.encoder(enroll)
-        et = self.text_enc(texts)
-        eq = self.encoder(query)
-        cos = (et * eq).sum(-1)
-        return cos, ea, et, eq
+        ea_frames = self.encoder(enroll)      # (B, Te, D)
+        et_tokens, mask = self.text_enc(texts) # (B, L, D)
+        eq_frames = self.encoder(query)        # (B, Tq, D)
+        # Both enroll and query audio align to the same text
+        score_e = self.aligner(et_tokens, ea_frames, mask)
+        score_q = self.aligner(et_tokens, eq_frames, mask)
+        return (score_e + score_q) / 2, ea_frames, et_tokens, eq_frames
 
 
 # ═══════════ Data ═══════════
