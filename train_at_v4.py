@@ -192,12 +192,12 @@ def load_pairs(csv_path):
                          "query_txt": r.get("query_txt","")})
     return rows
 
-def dedup(pairs, n=1):
+def dedup(pairs, max_per_pair=1):
     seen = {}; res = []
     for p in pairs:
         k = (p["enroll_txt"].lower(), p.get("query_txt",p["enroll_txt"]).lower())
         if k not in seen: seen[k] = 0
-        if seen[k] < n: seen[k] += 1; res.append(p)
+        if seen[k] < max_per_pair: seen[k] += 1; res.append(p)
     return res
 
 def load_all_data(cfg):
