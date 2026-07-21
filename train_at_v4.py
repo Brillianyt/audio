@@ -264,10 +264,16 @@ class PairDataset(Dataset):
     def __getitem__(self, idx):
         p = self.pairs[idx]; pid = p["id"]
         eid = p.get("enroll_id", pid); qid = p.get("query_id", pid)
+        # OHEM pairs: use real audio ID from query_aid, swap text to confused word
+        is_ohem = p.get("type","") == "at_ohem_fp"
+        if is_ohem:
+            real_aid = p.get("query_aid", qid)
+            eid = real_aid; qid = real_aid
+            txt = p.get("query_txt" if is_ohem else "enroll_txt", "").lower()
         zf = self._get_zip_for(p)
         e = self._read_wav(eid, "enroll", zf)
         q = self._read_wav(qid, "query", zf)
-        return e, q, float(p.get("label", 0)), p.get("enroll_txt", "").lower(), pid
+        return e, q, float(p.get("label", 0)), txt, pid
 
 def collate_text(batch):
     ml = max(max(b[0].shape[-1], b[1].shape[-1]) for b in batch)
