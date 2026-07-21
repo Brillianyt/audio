@@ -269,7 +269,9 @@ class PairDataset(Dataset):
         if is_ohem:
             real_aid = p.get("query_aid", qid)
             eid = real_aid; qid = real_aid
-            txt = p.get("query_txt" if is_ohem else "enroll_txt", "").lower()
+            txt = p.get("query_txt", "").lower()
+        else:
+            txt = p.get("enroll_txt", "").lower()
         zf = self._get_zip_for(p)
         e = self._read_wav(eid, "enroll", zf)
         q = self._read_wav(qid, "query", zf)
