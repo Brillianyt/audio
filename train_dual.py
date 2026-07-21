@@ -518,7 +518,7 @@ def train_audio(cfg, args):
 
             opt.zero_grad(); loss.backward(); opt.step()
             ls += loss.item(); n += 1
-            del ea, qa, all_emb, cos_sim, loss, _cp, _cn
+            del cos_sim, logit, ea, qa, loss, _cp, _cn
 
         # ── eval (pairwise cosine → sigmoid → AUC) ──
         @torch.no_grad()
