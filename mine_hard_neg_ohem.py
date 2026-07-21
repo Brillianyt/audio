@@ -262,6 +262,7 @@ if __name__ == "__main__":
     p.add_argument("--aa-ckpt", default="output/aa_pk/aa_final.pt")
     p.add_argument("--out-dir", default="baseline")
     p.add_argument("--samples", type=int, default=3, help="query samples per word")
+    p.add_argument("--at-only", action="store_true", help="only mine AT, skip AA")
     args = p.parse_args()
 
     cfg = Config()
@@ -276,23 +277,22 @@ if __name__ == "__main__":
 
     # True OHEM — model scores every pair
     at_fp, at_fn = mine_at_ohem(at_model, word_audio_map, reader, cfg, samples_per_word=args.samples)
-    aa_fp, aa_fn = mine_aa_ohem(aa_model, word_audio_map, reader, cfg, samples_per_word=args.samples)
 
     out_dir = os.path.join(PATHS.root, args.out_dir)
-
+    # Save AT results immediately (don't wait for AA)
     json.dump(at_fp, open(os.path.join(out_dir, "hard_neg_at_ohem.json"), "w"), indent=2)
-    json.dump(aa_fp, open(os.path.join(out_dir, "hard_neg_aa_ohem.json"), "w"), indent=2)
     json.dump(at_fn, open(os.path.join(out_dir, "hard_pos_at_ohem.json"), "w"), indent=2)
-    json.dump(aa_fn, open(os.path.join(out_dir, "hard_pos_aa_ohem.json"), "w"), indent=2)
+    print(f"  saved hard_neg_at_ohem.json ({len(at_fp)} pairs)")
+    print(f"  saved hard_pos_at_ohem.json ({len(at_fn)} words)")
+
+    if not args.at_only:
+        aa_fp, aa_fn = mine_aa_ohem(aa_model, word_audio_map, reader, cfg, samples_per_word=args.samples)
+        json.dump(aa_fp, open(os.path.join(out_dir, "hard_neg_aa_ohem.json"), "w"), indent=2)
+        json.dump(aa_fn, open(os.path.join(out_dir, "hard_pos_aa_ohem.json"), "w"), indent=2)
 
     print(f"\n=== True OHEM Results ===")
     print(f"  AT false positives: {len(at_fp)}")
-    print(f"  AA false positives: {len(aa_fp)}")
     print(f"  AT false negatives: {len(at_fn)}")
-    print(f"  AA false negatives: {len(aa_fn)}")
     if at_fp:
         top5 = [(p["enroll_txt"], p["query_txt"], f"{p['score']:.3f}") for p in at_fp[:5]]
         print(f"  AT top-5 FP: {top5}")
-    if aa_fp:
-        top5 = [(p["enroll_txt"], p["query_txt"], f"{p['score']:.3f}") for p in aa_fp[:5]]
-        print(f"  AA top-5 FP: {top5}")
