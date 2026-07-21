@@ -626,7 +626,8 @@ def train_text(cfg, args):
     dv_s = dev_ld(cfg.dev_seen_zip, cfg.dev_seen_csv)
     dv_u = dev_ld(cfg.dev_unseen_zip, cfg.dev_unseen_csv)
 
-    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, small_te=args.small_te).to(device)
+    uf = 0 if args.small_te else cfg.unfreeze_layers
+    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te).to(device)
     best, start_ep = -1.0, 1
     if args.resume:
         latest = os.path.join(out_dir, "latest.pt")
