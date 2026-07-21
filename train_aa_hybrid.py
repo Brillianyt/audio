@@ -102,11 +102,6 @@ class FrameCrossAttention(nn.Module):
         K = self.k_proj(e_frames).view(B, Te, self.n_heads, self.head_dim).transpose(1,2)
         V = self.v_proj(e_frames).view(B, Te, self.n_heads, self.head_dim).transpose(1,2)
         attn = torch.matmul(Q, K.transpose(-2,-1)) * self.scale
-        # Position bias: penalize distant frame pairs (encourages sequential alignment)
-        q_pos = torch.arange(Tq, device=q_frames.device).float().view(1,1,Tq,1)
-        e_pos = torch.arange(Te, device=q_frames.device).float().view(1,1,1,Te)
-        pos_bias = -0.1 * (q_pos - e_pos).abs() / max(Tq, Te)
-        attn = attn + pos_bias
         attn = F.softmax(attn, dim=-1)
         context = torch.matmul(attn, V).transpose(1,2).contiguous().view(B, Tq, D)
         context = F.normalize(context, dim=-1)
@@ -126,8 +121,8 @@ class AAHybridModel(nn.Module):
         self.attn = FrameCrossAttention(embed_dim)
         # Dynamic gate: input-dependent α, not global constant
         self.gate = nn.Sequential(
-            nn.Linear(4, 32), nn.ReLU(),
-            nn.Linear(32, 1),
+            nn.Linear(embed_dim*4 + 2, 64), nn.ReLU(),
+            nn.Linear(64, 1),
         )
 
     def forward(self, enroll, query):
@@ -140,15 +135,13 @@ class AAHybridModel(nn.Module):
         # Attention branch
         attn_score = self.attn(q_frames=eq_frames, e_frames=ea_frames)  # (B,)
 
-        # Dynamic gate: score-based, not embedding-based (avoids speaker overfit)
+        # Dynamic gate: depends on both embeddings and scores
         gap = cos_score - attn_score
         gate_in = torch.cat([
-            cos_score.unsqueeze(-1),
-            attn_score.unsqueeze(-1),
-            gap.unsqueeze(-1),
-            gap.abs().unsqueeze(-1),
+            ea_emb, eq_emb, ea_emb - eq_emb, ea_emb * eq_emb,
+            cos_score.unsqueeze(-1), gap.unsqueeze(-1),
         ], dim=-1)
-        alpha = torch.sigmoid(self.gate(gate_in)).squeeze(-1)
+        alpha = torch.sigmoid(self.gate(gate_in)).squeeze(-1)  # (B,)
 
         score = alpha * cos_score + (1 - alpha) * attn_score
         return score, ea_emb, eq_emb, cos_score, attn_score, alpha
@@ -241,9 +234,7 @@ def train_aa_hybrid(cfg, args):
     model = AAHybridModel(cfg.embed_dim, unfreeze=cfg.unfreeze_layers).to(device)
     if args.load_ckpt:
         ckpt = torch.load(args.load_ckpt, map_location=device, weights_only=False)
-        # Skip gate params if loading from v2 (different gate architecture)
-        state = {k: v for k, v in ckpt["model"].items() if not k.startswith("gate.")}
-        model.load_state_dict(state, strict=False)
+        model.load_state_dict(ckpt["model"], strict=False)
         print(f"  loaded encoder from {args.load_ckpt}")
 
     best, start_ep = -1.0, 1
@@ -251,8 +242,7 @@ def train_aa_hybrid(cfg, args):
         for fp in [os.path.join(out_dir,"latest.pt"), os.path.join(out_dir,"best.pt")]:
             if os.path.isfile(fp):
                 ckpt = torch.load(fp, map_location=device, weights_only=False)
-                state = {k: v for k, v in ckpt["model"].items() if not k.startswith("gate.")}
-                model.load_state_dict(state, strict=False)
+                model.load_state_dict(ckpt["model"], strict=False)
                 best = ckpt.get("auc_unseen",-1); start_ep = ckpt.get("epoch",0)+1
                 print(f"  resumed ep{start_ep}"); break
 
@@ -364,7 +354,7 @@ class Config:
     embed_dim: int = 256
     sample_rate: int = 16000
     max_audio_sec: float = 1.5
-    unfreeze_layers: int = 2
+    unfreeze_layers: int = 6
     epochs: int = 30
     lr: float = 3e-4
     batch_size: int = 256
