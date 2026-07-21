@@ -335,8 +335,7 @@ def load_all_data(cfg):
         "train/speech_commands_pairs.json",
         "baseline/hard_neg_atv2.json",
         "train/librispeech_pairs.json",
-        "baseline/hard_neg_at_final.json",
-        "baseline/hard_neg_aa_final.json",
+        "baseline/hard_neg_at_ohem.json",  # True OHEM: model error-driven
     ]
     for fn in extra_files:
         fp = os.path.join(PATHS.root, fn)
