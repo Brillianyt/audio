@@ -245,10 +245,22 @@ class AudioAudioModel(nn.Module):
                              if k.startswith("encoder.")}
                 self.encoder.load_state_dict(enc_state, strict=False)
                 print(f"  [audio] loaded whisper weights")
+        # Comparison head: [ea, qa, ea*qa, |ea-qa|] → logit
+        d = embed_dim
+        self.head = nn.Sequential(
+            nn.Linear(d * 4, d),
+            nn.ReLU(), nn.BatchNorm1d(d), nn.Dropout(0.1),
+            nn.Linear(d, 64),
+            nn.ReLU(), nn.BatchNorm1d(64),
+            nn.Linear(64, 1),
+        )
 
     def forward(self, e, q):
         ea = self.encoder(e); qa = self.encoder(q)
-        return (ea * qa).sum(-1), ea, qa
+        feat = torch.cat([ea, qa, ea * qa, (ea - qa).abs()], dim=-1)
+        logit = self.head(feat).squeeze(-1)
+        cos = (ea * qa).sum(-1)
+        return cos, logit, ea, qa
 
 
 # ═══════════ Model B: Audio-Text ═══════════
@@ -476,25 +488,12 @@ def train_audio(cfg, args):
             ea = model.encoder(e)                            # (B, D)
             qa = model.encoder(q)                            # (B, D)
 
-            # ── build all-embeddings matrix ──
-            all_emb = F.normalize(torch.cat([ea, qa], dim=0), dim=-1)  # (2B, D)
+            # ── forward: comparison head + BCE (pure pair classification) ──
+            cos_sim, logit, ea, qa = model(e, q)
+            pos_weight = torch.tensor([4.0], device=device)
+            loss = F.binary_cross_entropy_with_logits(logit, y, pos_weight=pos_weight)
 
-            # ── word IDs: enroll gets e_txt, query gets q_txt ──
-            all_txts = list(e_txts) + list(q_txts)
-            word_map = {}
-            word_ids = []
-            for t in all_txts:
-                t = t.lower().strip()
-                if t not in word_map:
-                    word_map[t] = len(word_map)
-                word_ids.append(word_map[t])
-            word_ids = torch.tensor(word_ids, device=device)  # (2B,)
-
-            # ── SupCon loss ──
-            loss = supcon_loss(all_emb, word_ids, temperature=temperature)
-
-            # ── monitor pairwise cosine ──
-            cos_sim = (ea * qa).sum(-1)                      # (B,)
+            # ── monitor ──
             pos = (y == 1); neg = (y == 0)
             _cp = cos_sim[pos]; _cn = cos_sim[neg]
 
@@ -527,10 +526,10 @@ def train_audio(cfg, args):
             model.eval(); ps, ls_list, ids, all_cs = [], [], [], []
             for e, q, y, _, _, id_ in ld:
                 e, q = e.to(device), q.to(device)
-                cs, _, _ = model(e, q)
-                ps.append(torch.sigmoid(cs * eval_scale).cpu().numpy())
+                _, logit, _, _ = model(e, q)
+                ps.append(torch.sigmoid(logit).cpu().numpy())
                 ls_list.append(y.numpy()); ids.extend(id_)
-                all_cs.append(cs.cpu().numpy())
+                all_cs.append(logit.cpu().numpy())
             return (roc_auc_score(np.concatenate(ls_list), np.concatenate(ps)),
                     np.concatenate(ps), np.concatenate(ls_list), ids,
                     np.concatenate(all_cs))
