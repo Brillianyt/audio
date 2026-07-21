@@ -635,11 +635,35 @@ def train_text(cfg, args):
             return DataLoader(ds, batch_size=B, shuffle=True, num_workers=0,
                               collate_fn=collate_text, pin_memory=True, drop_last=True)
     else:
+        # Dedup: group by (enroll_txt, query_txt), pick 1 random per key
+        pos_groups = {}
+        for i, p in enumerate(pos_pairs):
+            k = (p["enroll_txt"].lower(), p["query_txt"].lower())
+            pos_groups.setdefault(k, []).append(i)
+        neg_groups = {}
+        for i, p in enumerate(neg_pairs):
+            k = (p["enroll_txt"].lower(), p["query_txt"].lower())
+            neg_groups.setdefault(k, []).append(i)
+        pos_keys = list(pos_groups.keys())
+        neg_keys = list(neg_groups.keys())
+        rng.shuffle(pos_keys); rng.shuffle(neg_keys)
+        print(f"  AT dedup: {len(pos_keys)} pos keys, {len(neg_keys)} neg keys")
+
         def get_loader(ep):
-            n_pos = min(100000, len(pos_pairs))
-            n_neg = min(200000, len(neg_pairs))
-            subset = rng.choice(pos_pairs, n_pos, replace=False).tolist()
-            subset += rng.choice(neg_pairs, n_neg, replace=False).tolist()
+            n_pos = min(100000, len(pos_keys))
+            n_neg = min(200000, len(neg_keys))
+            subset = []
+            # Cycle through shuffled keys, pick 1 random audio per key
+            pp = (ep * n_pos) % len(pos_keys) if len(pos_keys) > 0 else 0
+            for i in range(n_pos):
+                k = pos_keys[(pp + i) % len(pos_keys)]
+                idx = rng.choice(pos_groups[k])
+                subset.append(pos_pairs[idx])
+            np_start = (ep * n_neg) % len(neg_keys) if len(neg_keys) > 0 else 0
+            for i in range(n_neg):
+                k = neg_keys[(np_start + i) % len(neg_keys)]
+                idx = rng.choice(neg_groups[k])
+                subset.append(neg_pairs[idx])
             np.random.shuffle(subset)
             ds = PairDataset(subset, cfg.train_zip, cfg, "text")
             return DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
