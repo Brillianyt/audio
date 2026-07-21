@@ -147,17 +147,14 @@ def deduplicate_by_word_pair(pairs, max_per_pair=1):
     return deduped
 
 def load_all_data(cfg):
-    """AA: original train CSV only. No external data."""
+    """AA: original train CSV, only positive pairs."""
     rng = np.random.default_rng(42)
     all_pairs = load_pairs(cfg.train_csv)  # original competition data only
-    print(f"  total: {len(all_pairs)} pairs (original only)")
     pos_pairs = [p for p in all_pairs if p["label"] == 1]
-    neg_pairs = [p for p in all_pairs if p["label"] == 0]
     pos_dedup = deduplicate_by_word_pair(pos_pairs, max_per_pair=10)
-    hard_dedup = deduplicate_by_word_pair(neg_pairs, max_per_pair=3)
-    rng.shuffle(pos_dedup); rng.shuffle(hard_dedup)
-    print(f"  pos={len(pos_dedup)} neg={len(hard_dedup)}")
-    return pos_dedup, hard_dedup
+    rng.shuffle(pos_dedup)
+    print(f"  total pos={len(pos_dedup)} (original CSV only)")
+    return pos_dedup
 
 class PairDataset(Dataset):
     def __init__(self, pairs, zip_path, cfg):
@@ -211,7 +208,7 @@ def train_aa_cross(cfg, args):
     os.makedirs(out_dir, exist_ok=True)
 
     print("[AA-Cross] loading data...")
-    pos_dedup, hard_dedup = load_all_data(cfg)
+    pos_dedup = load_all_data(cfg)
 
     model = AACrossModel(cfg.embed_dim, unfreeze=cfg.unfreeze_layers).to(device)
     if args.load_ckpt:
@@ -247,23 +244,20 @@ def train_aa_cross(cfg, args):
     dv_u = dev_ld(cfg.dev_unseen_zip, cfg.dev_unseen_csv)
 
     for ep in range(start_ep, cfg.epochs + 1):
-        n_pos_ep = min(100000, len(pos_dedup))
-        n_hard_ep = min(100000, len(hard_dedup) * 2)
+        n_pos_ep = min(80000, len(pos_dedup))
         idx_pos = np.random.permutation(len(pos_dedup))[:n_pos_ep]
-        idx_hard = np.random.choice(len(hard_dedup), n_hard_ep, replace=True)
-        subset = [pos_dedup[i] for i in idx_pos] + \
-                 [hard_dedup[i] for i in idx_hard]
+        subset = [pos_dedup[i] for i in idx_pos]
         np.random.shuffle(subset)
 
         loader = DataLoader(PairDataset(subset, cfg.train_zip, cfg),
                             batch_size=cfg.batch_size, shuffle=True,
                             num_workers=cfg.num_workers, collate_fn=collate_text,
                             pin_memory=True, drop_last=True)
-        print(f"[AA-Cross ep{ep}] train={len(subset)} pos={n_pos_ep} neg={n_hard_ep}")
+        print(f"[AA-Cross ep{ep}] train={len(subset)} (pos only)")
 
         model.train(); ts = time.time(); total_loss = 0.0; n_batches = 0
         for e, q, y, txts, _ in loader:
-            e, q, y = e.to(device), q.to(device), y.to(device)
+            e, q = e.to(device), q.to(device)
             snr = float(np.random.choice(
                 [np.random.uniform(0,5), np.random.uniform(-5,0), np.random.uniform(-10,-5)],
                 p=[0.7,0.2,0.1]))
@@ -272,11 +266,8 @@ def train_aa_cross(cfg, args):
 
             with torch.cuda.amp.autocast():
                 score, _, _ = model(e, q)
-                pos = (y == 1); neg = (y == 0)
-                margin = 0.0
-                if pos.any(): margin += F.relu(0.6 - score[pos]).mean()
-                if neg.any(): margin += F.relu(score[neg] + 0.15).mean()
-                loss = crit(score * cfg.cos_scale, y) + 0.1 * margin
+                # Simple: push cross-attn score > 0.6 for same-word pairs
+                loss = F.relu(0.6 - score).mean()
 
             opt.zero_grad()
             scaler.scale(loss).backward()
@@ -285,10 +276,8 @@ def train_aa_cross(cfg, args):
 
             total_loss += loss.item(); n_batches += 1
             if n_batches % cfg.log_every == 0:
-                cp = score[pos].mean().item() if pos.any() else 0
-                cn = score[neg].mean().item() if neg.any() else 0
                 print(f"  [ep{ep}] b{n_batches} loss={total_loss/n_batches:.3f} "
-                      f"score+={cp:.3f} score-={cn:.3f} gap={cp-cn:.3f}")
+                      f"score+={score.mean().item():.3f}")
 
         @torch.no_grad()
         def ev(ld):
