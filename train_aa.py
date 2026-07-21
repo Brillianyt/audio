@@ -285,7 +285,17 @@ def train_aa(cfg, args):
                 margin = 0.0
                 if pos.any(): margin += F.relu(0.6 - logit[pos]).mean()
                 if neg.any(): margin += F.relu(logit[neg] + 0.15).mean()
-                loss = crit(logit * cfg.cos_scale, y) + 0.1 * margin
+
+                # SupCon: pull positive pairs closer in cosine space
+                supcon = 0.0
+                if pos.sum() >= 2:
+                    idx = torch.where(pos)[0]
+                    ea_p = F.normalize(ea[idx], dim=-1)
+                    eq_p = F.normalize(eq[idx], dim=-1)
+                    sim = (ea_p.unsqueeze(0) * eq_p.unsqueeze(1)).sum(-1)
+                    supcon = F.relu(0.6 - sim).mean()
+
+                loss = crit(logit * cfg.cos_scale, y) + 0.1 * margin + 0.05 * supcon
 
             opt.zero_grad()
             scaler.scale(loss).backward()
