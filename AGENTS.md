@@ -495,6 +495,30 @@ AA 对 seen 词自信，AT 对 unseen 自信。各自不自信时对方的权重
 
 ## 阶段性训练方案 (2026-07-21)
 
+### 关键发现：AT backup 的 unseen=0.691 是真实的 (2026-07-21)
+
+之前多次测试 AT backup 得到 ~0.51，原因是用错了 GRU 层数。checkpoint 实际是 **2 层 GRU**，但 `train_at_v3.py` 被改成了 4 层。`strict=False` 加载时 GRU 权重不匹配被跳过，文本编码器等同随机初始化。
+
+正确加载（2 层 GRU）后：
+- `cos(et, eq) * 8 → sigmoid`：seen=0.674, **unseen=0.691** ✅
+- `compare(et, eq) * 8 → sigmoid`：seen=0.558, unseen=0.535 ❌
+
+结论：
+1. **unseen=0.69 是真实的跨模态泛化** — ComparisonHead 在 `compare(ea, et)` 上的训练成了有效代理任务，逼出了 cosine 空间的泛化能力
+2. ComparisonHead 跨到 `compare(et, eq)` 就失效 — 它学的是 enroll 自一致性，不是 query 匹配
+3. **评估必须用 `cos(et, eq)`** — 这是泛化能力的来源
+4. **加载 checkpoint 必须确认 GRU 层数匹配** — `strict=False` 不会报错但会静默跳过不匹配的权重
+
+### 最优模型现状
+
+| 模型 | Seen | Unseen | 权重路径 | 架构 |
+|------|------|--------|----------|------|
+| AT backup | 0.674 | **0.691** | `output/backup/at_best.pt` | Whisper(解冻4层) + PhonemeBiGRU(**2层**) + ComparisonHead |
+| AA v5 | **0.767** | 0.514 | `output/aa_v5/best.pt` | Whisper(解冻2层) + ASP + cosine |
+| AA Hybrid v2 | 0.787 | 0.511 | `output/aa_hybrid/best.pt` | Whisper + cosine + frame-attn + dynamic gate |
+
+**互补关系**：AA 管 seen（声学记忆），AT 管 unseen（跨模态泛化）。
+
 ### 第一阶段：AA 先跑通
 - 数据：原始 train.csv，只取 pos 对（同词不同音频）
 - 架构：WhisperFrameEncoder + FrameCrossAttention（可学习 DTW）
