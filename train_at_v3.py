@@ -332,17 +332,24 @@ def load_all_data(cfg):
         "baseline/hard_neg_iter2.json", "baseline/hard_neg_phoneme.json",
         "train/self_paired.json", "train/self_paired_xl.json",
         "train/fill_pos_pairs.json", "train/mega_pairs.json",
-        "train/speech_commands_pairs.json",
-        "baseline/hard_neg_atv2.json",
-        "train/librispeech_pairs.json",
         "baseline/hard_neg_at_ohem.json",  # True OHEM: model error-driven
     ]
     for fn in extra_files:
         fp = os.path.join(PATHS.root, fn)
         if os.path.isfile(fp):
             data = json.load(open(fp))
-            all_pairs += data
-            print(f"  loaded {fn}: {len(data)} pairs")
+            # Filter pairs whose zip file actually exists
+            valid = []
+            for p in data:
+                zp = p.get("zip", "")
+                if zp and not os.path.isfile(os.path.join(PATHS.root, zp)):
+                    continue  # skip pairs referencing deleted zips
+                valid.append(p)
+            all_pairs += valid
+            if len(valid) != len(data):
+                print(f"  loaded {fn}: {len(valid)}/{len(data)} pairs (filtered missing zips)")
+            else:
+                print(f"  loaded {fn}: {len(data)} pairs")
 
     print(f"  total before dedup: {len(all_pairs)} pairs")
 
