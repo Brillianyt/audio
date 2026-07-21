@@ -611,14 +611,14 @@ def train_text(cfg, args):
     print(f"  pos={len(pos_pairs)} neg={len(neg_pairs)}")
 
     def get_loader(ep):
-        n_pos = min(100000, len(pos_pairs))
-        n_neg = min(400000, len(neg_pairs))
+        n_pos = min(30000, len(pos_pairs))
+        n_neg = min(50000, len(neg_pairs))
         subset = rng.choice(pos_pairs, n_pos, replace=False).tolist()
         subset += rng.choice(neg_pairs, n_neg, replace=False).tolist()
         np.random.shuffle(subset)
         ds = PairDataset(subset, cfg.train_zip, cfg, "text")
         return DataLoader(ds, batch_size=512, shuffle=True,
-                          num_workers=cfg.num_workers, collate_fn=collate_text,
+                          num_workers=0, collate_fn=collate_text,
                           pin_memory=True, drop_last=True)
 
     def dev_ld(z,c):
