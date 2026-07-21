@@ -284,20 +284,42 @@ def train(cfg, args):
             q = q + (10**(-snr/20)) * torch.randn_like(q) * q.std(-1, keepdim=True)
 
             with torch.cuda.amp.autocast():
-                cos, ea, et, eq = model(e, txts, q)
+                score, ea_frames, et_tokens, eq_frames = model(e, txts, q)
                 pos = (y == 1); neg = (y == 0)
                 margin = 0.0
-                if pos.any(): margin += F.relu(0.6 - cos[pos]).mean()
-                if neg.any(): margin += F.relu(cos[neg] + 0.15).mean()
-                loss = F.binary_cross_entropy_with_logits(cos * cfg.cos_scale, y, pos_weight=torch.tensor(cfg.pos_weight, device=device)) + 0.1 * margin
+                if pos.any(): margin += F.relu(0.6 - score[pos]).mean()
+                if neg.any(): margin += F.relu(score[neg] + 0.15).mean()
+                bce = F.binary_cross_entropy_with_logits(score * cfg.cos_scale, y, pos_weight=torch.tensor(cfg.pos_weight, device=device))
+
+                # SupCon: pull same-word pooled audio embeddings closer
+                supcon = 0.0
+                if pos.sum() >= 2:
+                    # Mean pool frame features for sentence-level embedding
+                    ea_pool = ea_frames.mean(dim=1)  # (B, D)
+                    eq_pool = eq_frames.mean(dim=1)  # (B, D)
+                    # Concatenate enroll and query into one embedding set
+                    all_emb = torch.cat([ea_pool, eq_pool], dim=0)  # (2B, D)
+                    all_emb = F.normalize(all_emb, dim=-1)
+                    all_y = torch.cat([y, y], dim=0)                # (2B,)
+                    # Positive pair cosine
+                    cos_mat = all_emb @ all_emb.T  # (2B, 2B)
+                    same = (all_y.unsqueeze(0) == all_y.unsqueeze(1)).float()
+                    same.fill_diagonal_(0)
+                    # SupCon: log(sum(negative exp)) - log(positive exp)
+                    pos_sim = (cos_mat * same).sum(-1) / (same.sum(-1) + 1e-8)
+                    neg_mask = 1.0 - same
+                    neg_sim = (cos_mat.exp() * neg_mask).sum(-1).log()
+                    supcon = F.relu(1.0 - (pos_sim - neg_sim)).mean() * 0.1
+
+                loss = bce + 0.1 * margin + supcon
 
             opt.zero_grad(); scaler.scale(loss).backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             scaler.step(opt); scaler.update(); sched.step()
 
             tl += loss.item(); nb += 1
-            if pos.any(): cp += cos[pos].mean().item()
-            if neg.any(): cn += cos[neg].mean().item()
+            if pos.any(): cp += score[pos].mean().item()
+            if neg.any(): cn += score[neg].mean().item()
             cn_ += 1
             if cn_ % cfg.log_every == 0:
                 print(f"  [ep{ep}] b{cn_} loss={tl/nb:.3f} cos+={cp/cn_:.3f} cos-={cn/cn_:.3f} gap={cp/cn_-cn/cn_:.3f}")
