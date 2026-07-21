@@ -123,7 +123,7 @@ class PhonemeTokenEncoder(nn.Module):
 
 # ═══════════ Audio-Phoneme Cross Attention ═══════════
 class AudioPhonemeCrossAttention(nn.Module):
-    """Audio frames (query) attend to phoneme tokens (key/value) → alignment score."""
+    """Audio frames attend to phoneme tokens → per-phoneme alignment → top-k mean."""
     def __init__(self, embed_dim=256, n_heads=4):
         super().__init__()
         self.n_heads = n_heads
@@ -134,31 +134,21 @@ class AudioPhonemeCrossAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim)
 
     def forward(self, audio_frames, phoneme_tokens, ph_mask=None):
-        """
-        audio_frames: (B, Ta, D)
-        phoneme_tokens: (B, Lp, D)
-        Returns: alignment score (B,)
-        """
         B, Ta, D = audio_frames.shape
         _, Lp, _ = phoneme_tokens.shape
-
         Q = self.q_proj(audio_frames).view(B, Ta, self.n_heads, self.head_dim).transpose(1,2)
         K = self.k_proj(phoneme_tokens).view(B, Lp, self.n_heads, self.head_dim).transpose(1,2)
         V = self.v_proj(phoneme_tokens).view(B, Lp, self.n_heads, self.head_dim).transpose(1,2)
-
-        attn = torch.matmul(Q, K.transpose(-2,-1)) * self.scale  # (B, H, Ta, Lp)
+        attn = torch.matmul(Q, K.transpose(-2,-1)) * self.scale
         if ph_mask is not None:
             attn = attn.masked_fill(~ph_mask.unsqueeze(1).unsqueeze(2), -1e9)
         attn = F.softmax(attn, dim=-1)
-
         context = torch.matmul(attn, V).transpose(1,2).contiguous().view(B, Ta, D)
         context = F.normalize(context, dim=-1)
-
-        # Per-frame alignment: cosine between audio frame and phoneme-conditioned context
         frame_scores = (audio_frames * context).sum(-1)  # (B, Ta)
-        alignment = frame_scores.max(dim=-1).values  # max over audio frames
-
-        return alignment
+        # Top-k mean: requires multiple frames to agree
+        k = max(2, Ta // 4)
+        return frame_scores.topk(k, dim=-1).values.mean(-1)  # (B,)
 
 
 # ═══════════ AT v4 Model ═══════════
@@ -170,15 +160,13 @@ class ATv4Model(nn.Module):
         self.aligner = AudioPhonemeCrossAttention(embed_dim)
 
     def forward(self, enroll_audio, texts, query_audio):
-        """Returns alignment_score, enroll_audio_frames, phoneme_tokens, query_audio_frames."""
-        # Enroll audio → frame features (B, Ta, D)
-        ea_frames = self.audio_enc(enroll_audio)
-        # Text → phoneme token features (B, Lp, D)
-        et_tokens, _ = self.text_enc(texts)
-        # Query audio → frame features (B, Tq, D)
-        eq_frames = self.audio_enc(query_audio)
-        # Cross-attention: query audio frames attend to enroll phoneme tokens
-        score = self.aligner(eq_frames, et_tokens)
+        ea_frames = self.audio_enc(enroll_audio)   # (B, Te, D)
+        et_tokens, _ = self.text_enc(texts)          # (B, Lp, D)
+        eq_frames = self.audio_enc(query_audio)     # (B, Tq, D)
+        # Both enroll and query audio align to the same phoneme sequence
+        score_e = self.aligner(ea_frames, et_tokens)  # enroll→phoneme
+        score_q = self.aligner(eq_frames, et_tokens)   # query→phoneme
+        score = (score_e + score_q) / 2               # balanced
         return score, ea_frames, et_tokens, eq_frames
 
 
