@@ -98,7 +98,8 @@ class FrameCrossAttention(nn.Module):
         attn = torch.matmul(Q, K.transpose(-2,-1)) * self.scale
         attn = F.softmax(attn, dim=-1)
         context = torch.matmul(attn, V).transpose(1,2).contiguous().view(B, Tq, D)
-        frame_scores = (q_frames * context).sum(-1)  # (B, Tq)
+        context = F.normalize(context, dim=-1)  # bound in cosine range
+        frame_scores = (q_frames * context).sum(-1)  # (B, Tq), in [-1,1]
         return frame_scores.max(dim=-1).values  # max alignment
 
 
