@@ -611,7 +611,6 @@ def train_text(cfg, args):
     print(f"  pos={len(pos_pairs)} neg={len(neg_pairs)}")
 
     if args.small_te and args.pk:
-        # PK sampling: P words × K pos pairs per batch, plus neg pairs
         from collections import defaultdict
         word_to_idx = defaultdict(list)
         for i, p in enumerate(pos_pairs):
@@ -620,16 +619,17 @@ def train_text(cfg, args):
         print(f"  PK: {len(valid_words)} words with ≥2 pos pairs")
 
         def get_loader(ep):
-            P, K, B = 32, 4, 256  # P*K = 128 pairs per batch, 2 batches
+            P, K, B = 32, 4, 256
             np.random.seed(cfg.seed + ep)
-            subset, n_neg_pk = [], 128
-            # PK pos pairs
-            words = list(np.random.choice(valid_words, P, replace=False))
-            for w in words:
-                chosen = list(np.random.choice(word_to_idx[w], K, replace=False))
-                subset += [pos_pairs[i] for i in chosen]
-            # Also add random neg pairs
-            neg_idx = np.random.choice(len(neg_pairs), n_neg_pk, replace=True)
+            subset = []
+            # 50 PK batches = 6400 PK pos pairs
+            for _ in range(50):
+                words = list(np.random.choice(valid_words, P, replace=False))
+                for w in words:
+                    chosen = list(np.random.choice(word_to_idx[w], K, replace=False))
+                    subset += [pos_pairs[i] for i in chosen]
+            n_neg = max(len(subset), 128)
+            neg_idx = np.random.choice(len(neg_pairs), n_neg, replace=True)
             subset += [neg_pairs[i] for i in neg_idx]
             np.random.shuffle(subset)
             ds = PairDataset(subset, cfg.train_zip, cfg, "text")
