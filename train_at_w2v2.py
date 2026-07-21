@@ -88,7 +88,8 @@ class CharBiGRUTokens(nn.Module):
 
 # ═══════════ Cross-Attention Aligner ═══════════
 class CrossAttnAligner(nn.Module):
-    """Text tokens (Q) attend to audio frames (K,V) → alignment score."""
+    """Text tokens (Q) attend to audio frames (K,V) → alignment score.
+    Includes position bias for sequential alignment."""
     def __init__(self, embed_dim=256, n_heads=4):
         super().__init__()
         self.n_heads = n_heads
@@ -103,12 +104,6 @@ class CrossAttnAligner(nn.Module):
         )
 
     def forward(self, text_tokens, audio_frames, txt_mask=None):
-        """
-        text_tokens: (B, L, D)
-        audio_frames: (B, T, D)
-        txt_mask: (B, L) optional
-        Returns: alignment score (B,)
-        """
         B, L, D = text_tokens.shape
         _, T, _ = audio_frames.shape
         
@@ -116,7 +111,14 @@ class CrossAttnAligner(nn.Module):
         K = self.k_proj(audio_frames).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         V = self.v_proj(audio_frames).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         
-        attn = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        attn = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (B, H, L, T)
+        
+        # Position bias: token i → audio frame j, bias = -λ * |i/L - j/T|
+        t_pos = torch.arange(L, device=text_tokens.device).float() / max(L, 1)  # 0~1
+        a_pos = torch.arange(T, device=audio_frames.device).float() / max(T, 1)  # 0~1
+        pos_bias = -3.0 * (t_pos.view(1, 1, L, 1) - a_pos.view(1, 1, 1, T)).abs()
+        attn = attn + pos_bias
+        
         if txt_mask is not None:
             attn = attn.masked_fill(~txt_mask[:, None, :, None], -1e9)
         attn = F.softmax(attn, dim=-1)
@@ -124,11 +126,8 @@ class CrossAttnAligner(nn.Module):
         context = torch.matmul(attn, V).transpose(1, 2).contiguous().view(B, L, D)
         context = F.normalize(context, dim=-1)
         
-        # Rich per-token comparison: [tokens, context, diff, product]
         feat = torch.cat([text_tokens, context, text_tokens - context, text_tokens * context], dim=-1)
-        token_scores = self.compare(feat).squeeze(-1)  # (B, L)
-        
-        # Top-k mean over tokens: robust alignment
+        token_scores = self.compare(feat).squeeze(-1)
         k = max(1, L // 2)
         score = token_scores.topk(k, dim=-1).values.mean(-1)
         return score
