@@ -540,6 +540,7 @@ Fusion 头：MLP(5→16→1)，seen/unseen 分别训练，输入 `[p_aa, p_at, c
 
 ### 待办
 
+- [ ] **音频补静音（待施工）** — 参考文章发现音频前后各补 0.5~0.75s 静音使空转写率从 84% 降到 12%，AUC 从 0.58 提升到 0.75。当前所有模型（AA 和 AT）均未做此预处理，预计有显著提升
 - [ ] GPU 恢复后下载 LibriSpeech，用 `train_dual.py --mode text` 复现 AT v2（CharBiGRU, unseen 0.75）
 - [ ] 用 OHEM v3 正确 hard neg 训练 AT
 - [ ] 生成最终 submission（当前 submission.csv 已就绪但基于 PhonemeBiGRU AT）
