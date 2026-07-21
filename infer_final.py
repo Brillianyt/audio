@@ -1,101 +1,125 @@
-"""Final inference with best AT model — produce submission.csv."""
-import csv, json, os, sys, time, io, zipfile
-import numpy as np
-import torch, torch.nn.functional as F
+"""Ensemble inference: AA Hybrid v2 + AT backup + fusion heads → submission.csv"""
+import torch, os, sys, csv, numpy as np, io, zipfile
+import torch.nn as nn, torch.nn.functional as F
 import soundfile as sf
-from torch.utils.data import DataLoader, Dataset
+sys.path.insert(0, 'baseline'); from config import PATHS
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "baseline"))
-from config import PATHS
+device = 'cuda'
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-from train_at_v3 import AudioTextModel
+# ── Models ──
+import train_aa_hybrid
+import train_at_orig
 
-# ── Load best AT model ──
-model = AudioTextModel(256).to(device)
-ckpt = torch.load("output/at_v5/best.pt", map_location=device, weights_only=False)
-model.load_state_dict(ckpt["model"], strict=False)
-model.eval()
-print(f"AT: seen={ckpt.get('auc_seen',-1):.4f} unseen={ckpt.get('auc_unseen',-1):.4f}")
+# AA Hybrid v2
+aa = train_aa_hybrid.AAHybridModel(256, unfreeze=3).to(device)
+ckpt_aa = torch.load('output/aa_hybrid/best.pt', map_location=device, weights_only=False)
+aa.load_state_dict(ckpt_aa['model'], strict=False)
+aa.eval()
 
-scale = 8.0
+# AT backup (need encoder + text_enc for cos(et, eq))
+at = train_at_orig.AudioTextModel(256, unfreeze=4).to(device)
+ckpt_at = torch.load('output/backup/at_best.pt', map_location=device, weights_only=False)
+at.load_state_dict(ckpt_at['model'], strict=False)
+at.eval()
 
-# ── Dataset ──
-class EvalDataset(Dataset):
-    def __init__(self, csv_path, zip_path):
-        self.rows = []
-        with open(csv_path, encoding="utf-8") as f:
-            for r in csv.DictReader(f):
-                self.rows.append(r)
-        self.zip = zipfile.ZipFile(zip_path, "r")
+# Fusion heads
+class FusionHead(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(5, 16), nn.ReLU(), nn.Linear(16, 1))
+    def forward(self, p_aa, p_at):
+        conf_aa = (p_aa - 0.5).abs() * 2
+        conf_at = (p_at - 0.5).abs() * 2
+        gap = p_aa - p_at
+        return self.net(torch.stack([p_aa, p_at, conf_aa, conf_at, gap], dim=-1)).squeeze(-1)
 
-    def __len__(self):
-        return len(self.rows)
+ckpt_fusion = torch.load('output/fusion_heads_hybrid_v2.pt', map_location=device, weights_only=False)
+fus_s = FusionHead().to(device); fus_s.load_state_dict(ckpt_fusion['model_s']); fus_s.eval()
+fus_u = FusionHead().to(device); fus_u.load_state_dict(ckpt_fusion['model_u']); fus_u.eval()
 
-    def __getitem__(self, idx):
-        r = self.rows[idx]
-        pid = r["id"]
-        txt = r.get("enroll_txt", "").lower()
-        e_wav = self._read(f"wav/{pid}_enroll.wav")
-        if e_wav is None:
-            e_wav = self._read(f"wav/{pid}.wav")
-        q_wav = self._read(f"wav/{pid}_query.wav")
-        if q_wav is None:
-            q_wav = self._read(f"wav/{pid}.wav")
-        return e_wav, q_wav, txt, pid
+print(f'AA seen={ckpt_aa.get("auc_seen",-1):.4f}, AT unseen={ckpt_at.get("auc_unseen",-1):.4f}')
+print(f'Fusion seen={ckpt_fusion["auc_s"]:.4f}, unseen={ckpt_fusion["auc_u"]:.4f}')
 
-    def _read(self, name):
-        try:
-            data = self.zip.read(name)
-        except KeyError:
-            return None
-        wav, sr = sf.read(io.BytesIO(data), dtype="float32", always_2d=False)
-        if wav.ndim > 1:
-            wav = wav.mean(axis=1)
-        if sr != 16000:
-            import torchaudio
-            wav = torchaudio.functional.resample(torch.from_numpy(wav).unsqueeze(0), sr, 16000).squeeze(0).numpy()
-        ms = int(1.5 * 16000)
-        if len(wav) > ms:
-            wav = wav[:ms]
-        return torch.from_numpy(wav).float()
+# ── Inference ──
+def read_wav(zf, pid, role):
+    for name in [f'wav/{pid}_{role}.wav', f'wav/{pid}.wav']:
+        try: data = zf.read(name); break
+        except KeyError: continue
+    else: raise KeyError(name)
+    wav, sr = sf.read(io.BytesIO(data), dtype='float32', always_2d=False)
+    if wav.ndim > 1: wav = wav.mean(axis=1)
+    if sr != 16000:
+        import torchaudio
+        wav = torchaudio.functional.resample(torch.from_numpy(wav).unsqueeze(0), sr, 16000).squeeze(0).numpy()
+    ms = int(1.5 * 16000)
+    if len(wav) > ms: wav = wav[:ms]
+    return torch.from_numpy(wav).float()
 
-def collate(batch):
-    ml = max(max(b[0].shape[-1], b[1].shape[-1]) for b in batch)
-    es, qs, txts, ids = [], [], [], []
-    for b in batch:
-        e, q = b[0], b[1]
-        es.append(F.pad(e, (0, ml - e.shape[-1])) if e.shape[-1] < ml else e)
-        qs.append(F.pad(q, (0, ml - q.shape[-1])) if q.shape[-1] < ml else q)
-        txts.append(b[2]); ids.append(b[3])
-    return torch.stack(es), torch.stack(qs), txts, ids
-
-@torch.no_grad()
-def infer(subset_name):
-    csv_path = getattr(PATHS, f"eval_{subset_name}_csv")
-    zip_path = getattr(PATHS, f"eval_{subset_name}_zip")
-    ds = EvalDataset(csv_path, zip_path)
-    ld = DataLoader(ds, batch_size=256, num_workers=0, collate_fn=collate)
+def run_inference(csv_path, zip_path, prefix, fusion_head):
     results = []
-    for e, q, txts, ids in ld:
-        e, q = e.to(device), q.to(device)
-        _, _, et = model(e, txts)
-        eq = model.encoder(q)
-        cs = (et * eq).sum(-1)
-        probs = torch.sigmoid(cs * scale).cpu().numpy()
-        for pid, p in zip(ids, probs):
-            results.append({"id": pid, "posterior": float(p)})
-    print(f"  {subset_name}: {len(results)} samples")
+    zf = zipfile.ZipFile(zip_path, 'r')
+    with open(csv_path, encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            pid = row['id']
+            txt = row['enroll_txt'].lower()
+
+            # Read audio
+            e = read_wav(zf, pid, 'enroll').unsqueeze(0).to(device)
+            q = read_wav(zf, pid, 'query').unsqueeze(0).to(device)
+
+            # Pad to same length
+            ml = max(e.shape[-1], q.shape[-1])
+            if e.shape[-1] < ml: e = F.pad(e, (0, ml - e.shape[-1]))
+            if q.shape[-1] < ml: q = F.pad(q, (0, ml - q.shape[-1]))
+
+            with torch.no_grad():
+                # AA
+                score_aa, *_ = aa(e, q)
+                p_aa = torch.sigmoid(score_aa * 3.0)
+
+                # AT
+                _, _, et = at(e, [txt])
+                eq = at.encoder(q)
+                cs_at = (et * eq).sum(-1)
+                p_at = torch.sigmoid(cs_at * 8.0)
+
+                # Fusion
+                logit = fusion_head(p_aa, p_at)
+                posterior = torch.sigmoid(logit).item()
+
+            results.append((f'{prefix}_{pid}', posterior))
+
+    zf.close()
     return results
 
-print("\nInferring...")
-seen = infer("seen")
-unseen = infer("unseen")
-all_r = seen + unseen
+print('Inferring eval_seen...')
+seen_results = run_inference(
+    os.path.join(PATHS.root, 'evalcsv_without_label', 'eval_seen_without_label.csv'),
+    os.path.join(PATHS.root, 'eval', 'eval_seen', 'wav.zip'),
+    'seen_pair', fus_s)
+print(f'  {len(seen_results)} samples')
 
-out = "submission.csv"
-with open(out, "w") as f:
-    f.write("id,posterior\n")
-    for r in all_r:
-        f.write(f"{r['id']},{r['posterior']:.6f}\n")
-print(f"Saved {out} ({len(all_r)} rows)")
+print('Inferring eval_unseen...')
+unseen_results = run_inference(
+    os.path.join(PATHS.root, 'evalcsv_without_label', 'eval_unseen_without_label.csv'),
+    os.path.join(PATHS.root, 'eval', 'eval_unseen', 'wav.zip'),
+    'unseen_pair', fus_u)
+print(f'  {len(unseen_results)} samples')
+
+# Save
+all_results = seen_results + unseen_results
+out_path = os.path.join(PATHS.root, 'submission.csv')
+with open(out_path, 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(['id', 'posterior'])
+    for pid, post in all_results:
+        writer.writerow([pid, f'{post:.6f}'])
+
+print(f'Saved {out_path} ({len(all_results)} rows)')
+
+# Stats
+posteriors = [p for _, p in all_results]
+print(f'Posterior stats: mean={np.mean(posteriors):.4f} std={np.std(posteriors):.4f} '
+      f'min={np.min(posteriors):.4f} max={np.max(posteriors):.4f}')
+print(f'Pos (>0.5): {sum(1 for p in posteriors if p>0.5)}/{len(posteriors)}')
