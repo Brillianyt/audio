@@ -210,7 +210,7 @@ class PhonemeBiGRUEncoder(nn.Module):
     def __init__(self, dim=256):
         super().__init__()
         self.emb = nn.Embedding(40, dim)
-        self.gru = nn.GRU(dim, dim, batch_first=True, bidirectional=True, num_layers=4, dropout=0.1)
+        self.gru = nn.GRU(dim, dim, batch_first=True, bidirectional=True, num_layers=2, dropout=0.1)
         self.proj = nn.Linear(dim*2, dim)
 
     def forward(self, texts):
@@ -360,7 +360,7 @@ def load_all_data(cfg):
     # Keep all pos pairs (let model memorize seen words first)
     pos_dedup = deduplicate_by_word_pair(pos_pairs, max_per_pair=30)
     # For hard negs: use set for O(1) membership
-    hard_neg_ids = {"hard_neg", "hn_", "phoneme"}
+    hard_neg_ids = {"hard_neg", "hn_", "hnat_", "phoneme"}
     hard_neg = [p for p in neg_pairs if any(k in p.get("id","") for k in hard_neg_ids)]
     hard_id_set = {p["id"] for p in hard_neg}
     easy_neg = [p for p in neg_pairs if p["id"] not in hard_id_set]
