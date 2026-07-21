@@ -15,6 +15,7 @@ import soundfile as sf
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 
+import sys; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "baseline"))
 from config import PATHS
 
 
@@ -164,6 +165,28 @@ class CharBiGRUEncoder(nn.Module):
         return F.normalize(self.proj(h), dim=-1), None
 
 
+class CharBiGRU64(nn.Module):
+    """CharBiGRU_64: original AT v2 architecture (64d emb, 1-layer GRU)."""
+    def __init__(self, dim=256):
+        super().__init__()
+        self.char_emb = nn.Embedding(28, 64)
+        self.gru = nn.GRU(64, 64, batch_first=True, bidirectional=True, num_layers=1)
+        self.proj = nn.Linear(128, dim)
+
+    def forward(self, texts):
+        device = next(self.parameters()).device
+        if not texts: return torch.zeros(0,256,device=device),None
+        mx = max(len(t) for t in texts)
+        idx = torch.zeros(len(texts), mx, dtype=torch.long, device=device)
+        for i, t in enumerate(texts):
+            for j, c in enumerate(t[:mx]):
+                idx[i,j] = max(0, min(27, ord(c)-97))
+        x = self.char_emb(idx)
+        _, h = self.gru(x)
+        h = torch.cat([h[-2], h[-1]], -1)
+        return F.normalize(self.proj(h), dim=-1), None
+
+
 class WavLMEncoder(nn.Module):
     """WavLM base-plus encoder (same arch as whisper_v3)."""
     def __init__(self, embed_dim=256, unfreeze=2, max_sec=1.5):
@@ -231,10 +254,10 @@ class AudioAudioModel(nn.Module):
 # ═══════════ Model B: Audio-Text ═══════════
 
 class AudioTextModel(nn.Module):
-    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2):  # 自己的trainable whisper
+    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False):  # 自己的trainable whisper
         super().__init__()
         self.encoder = WhisperEncoder("base", embed_dim, unfreeze)
-        self.text_enc = CharBiGRUEncoder(embed_dim)
+        self.text_enc = CharBiGRU64(embed_dim) if small_te else CharBiGRUEncoder(embed_dim)
         self.log_var = nn.Parameter(torch.tensor(0.0))
         if ckpt_path and os.path.isfile(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
