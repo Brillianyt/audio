@@ -417,7 +417,9 @@ if __name__ == "__main__":
     print(f"  Unseen-like: {len(unseen_like)}, Seen-like: {len(seen_like)}")
     print(f"  Unique words in hard neg: {len(unique_words)}")
     if all_hard_neg:
-        print(f"  AT top-5: {[(p['enroll_txt'],p['query_txt'],f'{p['score']:.3f}') for p in at_hard_neg[:5]]}")
-        print(f"  AA top-5: {[(p['enroll_txt'],p['query_txt'],f'{p['score']:.3f}') for p in aa_hard_neg[:5]]}")
+        top5_at = [(p["enroll_txt"], p["query_txt"], f"{p['score']:.3f}") for p in at_hard_neg[:5]]
+        top5_aa = [(p["enroll_txt"], p["query_txt"], f"{p['score']:.3f}") for p in aa_hard_neg[:5]]
+        print(f"  AT top-5: {top5_at}")
+        print(f"  AA top-5: {top5_aa}")
         print(f"  AT hard pos: {at_hard_pos[:5]}")
         print(f"  AA hard pos: {aa_hard_pos[:5]}")
