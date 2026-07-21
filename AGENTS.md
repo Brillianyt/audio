@@ -495,34 +495,54 @@ AA 对 seen 词自信，AT 对 unseen 自信。各自不自信时对方的权重
 
 ## 阶段性训练方案 (2026-07-21)
 
-### 关键发现：AT backup 的 unseen=0.691 是真实的 (2026-07-21)
+### 最重要发现：AT 正确架构是 CharBiGRU，不是 PhonemeBiGRU
 
-之前多次测试 AT backup 得到 ~0.51，原因是用错了 GRU 层数。checkpoint 实际是 **2 层 GRU**，但 `train_at_v3.py` 被改成了 4 层。`strict=False` 加载时 GRU 权重不匹配被跳过，文本编码器等同随机初始化。
+- **AT v2（CharBiGRU, 0.7446 unseen）才是最强 AT** — 训练脚本 `train_dual.py --mode text`
+- PhonemeBiGRU 是后来加的实验性改进（`train_at_v3.py`），从未达到 CharBiGRU 的性能
+- `output/backup/at_best.pt`（0.69）用的是 PhonemeBiGRU，不是最好的 AT
+- AT 最佳路径已删除（`output/dual_at_v2_text/best.pt`），需用 `train_dual.py --mode text` 重新训练
 
-正确加载（2 层 GRU）后：
-- `cos(et, eq) * 8 → sigmoid`：seen=0.674, **unseen=0.691** ✅
-- `compare(et, eq) * 8 → sigmoid`：seen=0.558, unseen=0.535 ❌
+**CharBiGRU vs PhonemeBiGRU：**
+| | AT v2 最佳 | 当前 backup |
+|------|------|------|
+| 文本编码 | CharBiGRU (28字符, 64d, **1层**) | PhonemeBiGRU (40音素, 256d, 2-4层) |
+| Whisper | **冻结** | 解冻 4 层 |
+| unseen | **0.7446** | 0.69 |
+| 数据 | 只用 hard neg | 混了 easy neg |
 
-结论：
-1. **unseen=0.69 是真实的跨模态泛化** — ComparisonHead 在 `compare(ea, et)` 上的训练成了有效代理任务，逼出了 cosine 空间的泛化能力
-2. ComparisonHead 跨到 `compare(et, eq)` 就失效 — 它学的是 enroll 自一致性，不是 query 匹配
-3. **评估必须用 `cos(et, eq)`** — 这是泛化能力的来源
-4. **加载 checkpoint 必须确认 GRU 层数匹配** — `strict=False` 不会报错但会静默跳过不匹配的权重
+### AA 提升来自 SupCon + 降解冻，不是 frame attention
 
-### 最优模型现状
+今天 AA 实验汇总：
+- AA 纯 cosine: seen=0.76（基线）
+- AA Hybrid v2: seen=0.787 — **提升来自 SupCon loss + unfreeze 3，attention 分支全程死亡（α→0.98）**
+- AA 纯 cosine + SupCon: seen=0.768 — 确认 SupCon 有效
+- Frame cross-attention 三次尝试均失败：v1 max-pooling 饱和、v2 无界输出、v3 死分支
 
-| 模型 | Seen | Unseen | 权重路径 | 架构 |
-|------|------|--------|----------|------|
-| AT backup | 0.674 | **0.691** | `output/backup/at_best.pt` | Whisper(解冻4层) + PhonemeBiGRU(**2层**) + ComparisonHead |
-| AA v5 | **0.767** | 0.514 | `output/aa_v5/best.pt` | Whisper(解冻2层) + ASP + cosine |
-| AA Hybrid v2 | 0.787 | 0.511 | `output/aa_hybrid/best.pt` | Whisper + cosine + frame-attn + dynamic gate |
+**有效改进**：SupCon 损失 + 降解冻层数（6→2-3）。Frame attention 无贡献。
 
-**互补关系**：AA 管 seen（声学记忆），AT 管 unseen（跨模态泛化）。
+### 最优集成结果
 
-### 第一阶段：AA 先跑通
-- 数据：原始 train.csv，只取 pos 对（同词不同音频）
-- 架构：WhisperFrameEncoder + FrameCrossAttention（可学习 DTW）
-- 损失：`relu(0.6 - score)` — margin loss，推到 0.6 以上
+| | AA | AT | Fusion |
+|------|------|------|------|
+| Seen | 0.787 | 0.674 | **0.793** |
+| Unseen | — | 0.691 | **0.692** |
+| Macro | — | — | **0.743** |
+
+Fusion 头：MLP(5→16→1)，seen/unseen 分别训练，输入 `[p_aa, p_at, conf_aa, conf_at, gap]`。
+
+### OHEM v3：正确的训练对挖掘
+
+在真实训练 pair 上跑 AT 模型打分，收集：
+- FP（label=0, score>0.3）：2549 对 — 模型判错的不同词
+- FN（label=1, score<0.3）：9159 对 — 模型认不出的同词
+
+此前 OHEM v1/v2 是用词级 centroid 跨相似度，不是真实训练对，全错了。
+
+### 待办
+
+- [ ] GPU 恢复后下载 LibriSpeech，用 `train_dual.py --mode text` 复现 AT v2（CharBiGRU, unseen 0.75）
+- [ ] 用 OHEM v3 正确 hard neg 训练 AT
+- [ ] 生成最终 submission（当前 submission.csv 已就绪但基于 PhonemeBiGRU AT）
 - 目标：seen AUC 0.7+
 
 ### 第二阶段：AT 用 OHEM 硬负样本
