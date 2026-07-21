@@ -125,33 +125,16 @@ def deduplicate_by_word_pair(pairs, max_per_pair=1):
     return deduped
 
 def load_all_data(cfg):
+    """AA: original train CSV only. No external data."""
     rng = np.random.default_rng(42)
     all_pairs = load_pairs(cfg.train_csv)
-    extra_files = [
-        "baseline/hard_neg_whisper.json", "baseline/hard_neg_iter1.json",
-        "baseline/hard_neg_iter2.json", "baseline/hard_neg_phoneme.json",
-        "train/self_paired.json", "train/self_paired_xl.json",
-        "train/fill_pos_pairs.json", "train/mega_pairs.json",
-        "train/speech_commands_pairs.json",
-        "baseline/hard_neg_atv2.json",
-        "train/librispeech_pairs.json",
-    ]
-    for fn in extra_files:
-        fp = os.path.join(PATHS.root, fn)
-        if os.path.isfile(fp):
-            data = json.load(open(fp))
-            all_pairs += data
-            print(f"  loaded {fn}: {len(data)} pairs")
-    print(f"  total: {len(all_pairs)} pairs")
+    print(f"  total: {len(all_pairs)} pairs (original CSV only)")
     pos_pairs = [p for p in all_pairs if p["label"] == 1]
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
-    # Keep all pos for memorization
-    pos_dedup = pos_pairs
-    hard_neg_ids = {"hard_neg", "hn_", "phoneme"}
-    hard_neg = [p for p in neg_pairs if any(k in p.get("id","") for k in hard_neg_ids)]
-    hard_dedup = deduplicate_by_word_pair(hard_neg, max_per_pair=5)
+    pos_dedup = pos_pairs  # keep all pos for memorization
+    hard_dedup = deduplicate_by_word_pair(neg_pairs, max_per_pair=3)
     rng.shuffle(pos_dedup); rng.shuffle(hard_dedup)
-    print(f"  pos={len(pos_dedup)} hard_neg={len(hard_dedup)}")
+    print(f"  pos={len(pos_dedup)} neg={len(hard_dedup)}")
     return pos_dedup, hard_dedup
 
 class PairDataset(Dataset):
