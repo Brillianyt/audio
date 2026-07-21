@@ -80,6 +80,7 @@ class WhisperHybridEncoder(nn.Module):
 
 # ═══════════ Frame Cross-Attention ═══════════
 class FrameCrossAttention(nn.Module):
+    """Cross-attention with top-k mean pooling and feature concatenation."""
     def __init__(self, embed_dim=256, n_heads=4):
         super().__init__()
         self.n_heads = n_heads
@@ -88,6 +89,11 @@ class FrameCrossAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, embed_dim)
         self.k_proj = nn.Linear(embed_dim, embed_dim)
         self.v_proj = nn.Linear(embed_dim, embed_dim)
+        # Compare head: concat(q, context, q-context, q*context) → score
+        self.compare = nn.Sequential(
+            nn.Linear(embed_dim*4, embed_dim), nn.ReLU(),
+            nn.Linear(embed_dim, 1),
+        )
 
     def forward(self, q_frames, e_frames):
         B, Tq, D = q_frames.shape
@@ -98,18 +104,26 @@ class FrameCrossAttention(nn.Module):
         attn = torch.matmul(Q, K.transpose(-2,-1)) * self.scale
         attn = F.softmax(attn, dim=-1)
         context = torch.matmul(attn, V).transpose(1,2).contiguous().view(B, Tq, D)
-        context = F.normalize(context, dim=-1)  # bound in cosine range
-        frame_scores = (q_frames * context).sum(-1)  # (B, Tq), in [-1,1]
-        return frame_scores.max(dim=-1).values  # max alignment
+        context = F.normalize(context, dim=-1)
+        # Rich comparison features per frame
+        feat = torch.cat([q_frames, context, q_frames - context, q_frames * context], dim=-1)
+        frame_scores = self.compare(feat).squeeze(-1)  # (B, Tq)
+        # Top-k mean: robust to single-frame noise
+        k = max(2, Tq // 4)
+        return frame_scores.topk(k, dim=-1).values.mean(-1)  # (B,)
 
 
 # ═══════════ AA Hybrid Model ═══════════
 class AAHybridModel(nn.Module):
-    def __init__(self, embed_dim=256, unfreeze=6):
+    def __init__(self, embed_dim=256, unfreeze=3):
         super().__init__()
         self.encoder = WhisperHybridEncoder("base", embed_dim, unfreeze)
         self.attn = FrameCrossAttention(embed_dim)
-        self.alpha = nn.Parameter(torch.tensor(0.5))  # starts at 50/50
+        # Dynamic gate: input-dependent α, not global constant
+        self.gate = nn.Sequential(
+            nn.Linear(embed_dim*4 + 2, 64), nn.ReLU(),
+            nn.Linear(64, 1),
+        )
 
     def forward(self, enroll, query):
         ea_emb, ea_frames = self.encoder(enroll)
@@ -121,11 +135,16 @@ class AAHybridModel(nn.Module):
         # Attention branch
         attn_score = self.attn(q_frames=eq_frames, e_frames=ea_frames)  # (B,)
 
-        # Hybrid
-        alpha_clamped = torch.sigmoid(self.alpha)  # keep α in [0,1]
-        score = alpha_clamped * cos_score + (1 - alpha_clamped) * attn_score
+        # Dynamic gate: depends on both embeddings and scores
+        gap = cos_score - attn_score
+        gate_in = torch.cat([
+            ea_emb, eq_emb, ea_emb - eq_emb, ea_emb * eq_emb,
+            cos_score.unsqueeze(-1), gap.unsqueeze(-1),
+        ], dim=-1)
+        alpha = torch.sigmoid(self.gate(gate_in)).squeeze(-1)  # (B,)
 
-        return score, ea_emb, eq_emb, cos_score, attn_score
+        score = alpha * cos_score + (1 - alpha) * attn_score
+        return score, ea_emb, eq_emb, cos_score, attn_score, alpha
 
 
 # ═══════════ Data (same as train_aa.py, original CSV only) ═══════════
@@ -274,12 +293,27 @@ def train_aa_hybrid(cfg, args):
             q = q + (10**(-snr/20)) * torch.randn_like(q) * q.std(-1, keepdim=True)
 
             with torch.cuda.amp.autocast():
-                score, ea, eq, cos_s, attn_s = model(e, q)
+                score, ea, eq, cos_s, attn_s, alpha = model(e, q)
+
+                # BCE loss
+                bce = crit(score * cfg.cos_scale, y)
+
+                # Margin
                 pos = (y == 1); neg = (y == 0)
                 margin = 0.0
                 if pos.any(): margin += F.relu(0.6 - score[pos]).mean()
                 if neg.any(): margin += F.relu(score[neg] + 0.15).mean()
-                loss = crit(score * cfg.cos_scale, y) + 0.1 * margin
+
+                # SupCon: pull same-word pairs together in cosine space
+                supcon = 0.0
+                if pos.sum() >= 2:
+                    idx = torch.where(pos)[0]
+                    # Cosine similarity matrix among positive samples
+                    ea_pos = ea[idx]; eq_pos = eq[idx]
+                    sim = (ea_pos.unsqueeze(0) * eq_pos.unsqueeze(1)).sum(-1)  # pair-wise
+                    supcon = F.relu(0.6 - sim).mean()
+
+                loss = bce + 0.1 * margin + 0.05 * supcon
 
             opt.zero_grad()
             scaler.scale(loss).backward()
@@ -290,16 +324,17 @@ def train_aa_hybrid(cfg, args):
             if n_batches % cfg.log_every == 0:
                 cp = score[pos].mean().item() if pos.any() else 0
                 cn = score[neg].mean().item() if neg.any() else 0
+                am = alpha.mean().item()
                 print(f"  [ep{ep}] b{n_batches} loss={total_loss/n_batches:.3f} "
                       f"score+={cp:.3f} score-={cn:.3f} gap={cp-cn:.3f} "
-                      f"cos={cos_s.mean().item():.3f} attn={attn_s.mean().item():.3f} α={torch.sigmoid(model.alpha).item():.3f}")
+                      f"cos={cos_s.mean().item():.3f} attn={attn_s.mean().item():.3f} α={am:.3f}")
 
         @torch.no_grad()
         def ev(ld):
             model.eval(); ps, ls = [], []
             for e, q, y, txts, _ in ld:
                 e, q = e.to(device), q.to(device)
-                score, _, _, _, _ = model(e, q)
+                score, *_ = model(e, q)
                 ps.append(torch.sigmoid(score * cfg.cos_scale).cpu().numpy())
                 ls.append(y.numpy())
             return roc_auc_score(np.concatenate(ls), np.concatenate(ps))
