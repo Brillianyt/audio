@@ -563,7 +563,6 @@ def train_v3(cfg, args):
                 margin = 0.0
                 if pos.any(): margin += F.relu(0.6 - match_cos[pos]).mean()
                 if neg.any(): margin += F.relu(match_cos[neg] + 0.15).mean()
-                margin += F.relu(0.6 - ae_cos).mean()
 
                 loss = crit(match_cos * scale, y) + 0.1 * margin
 
