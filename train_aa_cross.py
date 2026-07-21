@@ -147,46 +147,17 @@ def deduplicate_by_word_pair(pairs, max_per_pair=1):
     return deduped
 
 def load_all_data(cfg):
-    """AA-specific: original train CSV + AA hard negs only."""
+    """AA: original train CSV only. No external data."""
     rng = np.random.default_rng(42)
-    all_pairs = load_pairs(cfg.train_csv)  # original competition data
-    # AA-specific hard negatives (from AA model mining, not AT)
-    aa_hard_files = [
-        "baseline/hard_neg_aa_final.json",
-        "baseline/hard_neg_aa_v2.json",
-    ]
-    # Pos-only files for audio diversity (only take label=1 pairs)
-    pos_files = [
-        "train/self_paired.json", "train/self_paired_xl.json",
-        "train/fill_pos_pairs.json", "train/mega_pairs.json",
-        "train/speech_commands_pairs.json", "train/librispeech_pairs.json",
-    ]
-    for fn in aa_hard_files:
-        fp = os.path.join(PATHS.root, fn)
-        if os.path.isfile(fp):
-            data = json.load(open(fp))
-            all_pairs += data
-            print(f"  loaded {fn}: {len(data)} pairs")
-    for fn in pos_files:
-        fp = os.path.join(PATHS.root, fn)
-        if os.path.isfile(fp):
-            data = json.load(open(fp))
-            pos_only = [p for p in data if p["label"] == 1]
-            all_pairs += pos_only
-            print(f"  loaded {fn}: {len(pos_only)} pos pairs")
-    print(f"  total: {len(all_pairs)} pairs")
+    all_pairs = load_pairs(cfg.train_csv)  # original competition data only
+    print(f"  total: {len(all_pairs)} pairs (original only)")
     pos_pairs = [p for p in all_pairs if p["label"] == 1]
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
     pos_dedup = deduplicate_by_word_pair(pos_pairs, max_per_pair=10)
-    # Only AA-specific hard negs (hnaa_ or hn_aa_ prefix)
-    hard_neg = [p for p in neg_pairs if p.get("id","").startswith(("hnaa_","hn_aa_"))]
-    hard_id_set = {p["id"] for p in hard_neg}
-    easy_neg = [p for p in neg_pairs if p["id"] not in hard_id_set]
-    hard_dedup = deduplicate_by_word_pair(hard_neg, max_per_pair=5)
-    easy_dedup = deduplicate_by_word_pair(easy_neg, max_per_pair=2)
-    rng.shuffle(pos_dedup); rng.shuffle(hard_dedup); rng.shuffle(easy_dedup)
-    print(f"  pos={len(pos_dedup)} hard_neg={len(hard_dedup)} easy_neg={len(easy_dedup)}")
-    return pos_dedup, hard_dedup, easy_dedup
+    hard_dedup = deduplicate_by_word_pair(neg_pairs, max_per_pair=3)
+    rng.shuffle(pos_dedup); rng.shuffle(hard_dedup)
+    print(f"  pos={len(pos_dedup)} neg={len(hard_dedup)}")
+    return pos_dedup, hard_dedup
 
 class PairDataset(Dataset):
     def __init__(self, pairs, zip_path, cfg):
@@ -240,7 +211,7 @@ def train_aa_cross(cfg, args):
     os.makedirs(out_dir, exist_ok=True)
 
     print("[AA-Cross] loading data...")
-    pos_dedup, hard_dedup, easy_dedup = load_all_data(cfg)
+    pos_dedup, hard_dedup = load_all_data(cfg)
 
     model = AACrossModel(cfg.embed_dim, unfreeze=cfg.unfreeze_layers).to(device)
     if args.load_ckpt:
@@ -278,20 +249,17 @@ def train_aa_cross(cfg, args):
     for ep in range(start_ep, cfg.epochs + 1):
         n_pos_ep = min(100000, len(pos_dedup))
         n_hard_ep = min(100000, len(hard_dedup) * 2)
-        n_easy_ep = min(100000, len(easy_dedup))
         idx_pos = np.random.permutation(len(pos_dedup))[:n_pos_ep]
         idx_hard = np.random.choice(len(hard_dedup), n_hard_ep, replace=True)
-        idx_easy = np.random.choice(len(easy_dedup), n_easy_ep, replace=True)
         subset = [pos_dedup[i] for i in idx_pos] + \
-                 [hard_dedup[i] for i in idx_hard] + \
-                 [easy_dedup[i] for i in idx_easy]
+                 [hard_dedup[i] for i in idx_hard]
         np.random.shuffle(subset)
 
         loader = DataLoader(PairDataset(subset, cfg.train_zip, cfg),
                             batch_size=cfg.batch_size, shuffle=True,
                             num_workers=cfg.num_workers, collate_fn=collate_text,
                             pin_memory=True, drop_last=True)
-        print(f"[AA-Cross ep{ep}] train={len(subset)} pos={n_pos_ep} hard={n_hard_ep} easy={n_easy_ep}")
+        print(f"[AA-Cross ep{ep}] train={len(subset)} pos={n_pos_ep} neg={n_hard_ep}")
 
         model.train(); ts = time.time(); total_loss = 0.0; n_batches = 0
         for e, q, y, txts, _ in loader:
