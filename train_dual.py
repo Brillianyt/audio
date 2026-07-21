@@ -637,8 +637,8 @@ def train_text(cfg, args):
                               collate_fn=collate_text, pin_memory=True, drop_last=True)
     else:
         def get_loader(ep):
-            n_pos = min(30000, len(pos_pairs))
-            n_neg = min(50000, len(neg_pairs))
+            n_pos = min(100000, len(pos_pairs))
+            n_neg = min(400000, len(neg_pairs))
             subset = rng.choice(pos_pairs, n_pos, replace=False).tolist()
             subset += rng.choice(neg_pairs, n_neg, replace=False).tolist()
             np.random.shuffle(subset)
