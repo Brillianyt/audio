@@ -147,29 +147,39 @@ def deduplicate_by_word_pair(pairs, max_per_pair=1):
     return deduped
 
 def load_all_data(cfg):
+    """AA-specific: original train CSV + AA hard negs only."""
     rng = np.random.default_rng(42)
-    all_pairs = load_pairs(cfg.train_csv)
-    extra_files = [
-        "baseline/hard_neg_whisper.json", "baseline/hard_neg_iter1.json",
-        "baseline/hard_neg_iter2.json", "baseline/hard_neg_phoneme.json",
+    all_pairs = load_pairs(cfg.train_csv)  # original competition data
+    # AA-specific hard negatives (from AA model mining, not AT)
+    aa_hard_files = [
+        "baseline/hard_neg_aa_final.json",
+        "baseline/hard_neg_aa_v2.json",
+    ]
+    # Pos-only files for audio diversity (only take label=1 pairs)
+    pos_files = [
         "train/self_paired.json", "train/self_paired_xl.json",
         "train/fill_pos_pairs.json", "train/mega_pairs.json",
-        "train/speech_commands_pairs.json",
-        "baseline/hard_neg_atv2.json", "train/librispeech_pairs.json",
-        "baseline/hard_neg_aa_final.json",
+        "train/speech_commands_pairs.json", "train/librispeech_pairs.json",
     ]
-    for fn in extra_files:
+    for fn in aa_hard_files:
         fp = os.path.join(PATHS.root, fn)
         if os.path.isfile(fp):
             data = json.load(open(fp))
             all_pairs += data
             print(f"  loaded {fn}: {len(data)} pairs")
+    for fn in pos_files:
+        fp = os.path.join(PATHS.root, fn)
+        if os.path.isfile(fp):
+            data = json.load(open(fp))
+            pos_only = [p for p in data if p["label"] == 1]
+            all_pairs += pos_only
+            print(f"  loaded {fn}: {len(pos_only)} pos pairs")
     print(f"  total: {len(all_pairs)} pairs")
     pos_pairs = [p for p in all_pairs if p["label"] == 1]
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
     pos_dedup = deduplicate_by_word_pair(pos_pairs, max_per_pair=10)
-    hard_neg_ids = {"hard_neg", "hn_", "phoneme"}
-    hard_neg = [p for p in neg_pairs if any(k in p.get("id","") for k in hard_neg_ids)]
+    # Only AA-specific hard negs (hnaa_ or hn_aa_ prefix)
+    hard_neg = [p for p in neg_pairs if p.get("id","").startswith(("hnaa_","hn_aa_"))]
     hard_id_set = {p["id"] for p in hard_neg}
     easy_neg = [p for p in neg_pairs if p["id"] not in hard_id_set]
     hard_dedup = deduplicate_by_word_pair(hard_neg, max_per_pair=5)
