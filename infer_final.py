@@ -136,7 +136,7 @@ with open(out_path, 'w', newline='') as f:
 print(f'Saved {out_path} ({len(all_results)} rows)')
 
 # Stats
-posteriors = [p for _, p in all_results]
-print(f'Posterior stats: mean={np.mean(posteriors):.4f} std={np.std(posteriors):.4f} '
-      f'min={np.min(posteriors):.4f} max={np.max(posteriors):.4f}')
-print(f'Pos (>0.5): {sum(1 for p in posteriors if p>0.5)}/{len(posteriors)}')
+posteriors_flat = [float(p[0]) if isinstance(p, (list,tuple)) else float(p) for _, p in all_results]
+print(f'Posterior stats: mean={np.mean(posteriors_flat):.4f} std={np.std(posteriors_flat):.4f} '
+      f'min={np.min(posteriors_flat):.4f} max={np.max(posteriors_flat):.4f}')
+print(f'Pos (>0.5): {sum(1 for p in posteriors_flat if p>0.5)}/{len(posteriors_flat)}')

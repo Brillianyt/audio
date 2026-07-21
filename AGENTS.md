@@ -530,13 +530,13 @@ AA 对 seen 词自信，AT 对 unseen 自信。各自不自信时对方的权重
 
 Fusion 头：MLP(5→16→1)，seen/unseen 分别训练，输入 `[p_aa, p_at, conf_aa, conf_at, gap]`。
 
-### OHEM v3：正确的训练对挖掘
+### OHEM v3：正确的训练对挖掘（2026-07-21）
 
 在真实训练 pair 上跑 AT 模型打分，收集：
 - FP（label=0, score>0.3）：2549 对 — 模型判错的不同词
 - FN（label=1, score<0.3）：9159 对 — 模型认不出的同词
 
-此前 OHEM v1/v2 是用词级 centroid 跨相似度，不是真实训练对，全错了。
+⚠️ **此前 OHEM v1/v2 使用错误的 PhonemeBiGRU AT 模型挖掘，数据已删除。GPU 恢复后需用 CharBiGRU AT v2 重新挖掘。**
 
 ### 待办
 

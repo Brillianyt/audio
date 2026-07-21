@@ -217,7 +217,7 @@ def load_all_data(cfg):
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
     pos_dedup = deduplicate_by_word_pair(pos_pairs, max_per_pair=30)
     hard_neg_ids = {"ohem_fp"}
-    hard_neg = [p for p in neg_pairs if any(k in p.get("id","") for k in hard_neg_ids)]
+    hard_neg = [p for p in neg_pairs if p.get("type","") in hard_neg_ids]
     hard_id_set = {p["id"] for p in hard_neg}
     easy_neg = [p for p in neg_pairs if p["id"] not in hard_id_set]
     hard_dedup = deduplicate_by_word_pair(hard_neg, max_per_pair=10)
