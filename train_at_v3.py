@@ -426,10 +426,19 @@ class PairDataset(Dataset):
         pid = p["id"]
         eid = p.get("enroll_id", pid)
         qid = p.get("query_id", pid)
+        # OHEM pairs: query_aid has real audio ID, enroll_txt ← query_txt (the confused word)
+        is_ohem = p.get("type","") == "at_ohem_fp"
+        if is_ohem:
+            real_aid = p.get("query_aid", qid)
+            eid = real_aid  # enroll audio = same as query (only used for margin)
+            qid = real_aid  # query audio = the real audio
+            txt = p.get("query_txt", "").lower()  # confused word as text target
+        else:
+            txt = p.get("enroll_txt", "").lower()
         zf = self._get_zip_for(p)
         e = self._read_wav(eid, "enroll", zf)
         q = self._read_wav(qid, "query", zf)
-        return e, q, float(p.get("label", 0)), p.get("enroll_txt", "").lower(), pid
+        return e, q, float(p.get("label", 0)), txt, pid
 
 
 def collate_text(batch):
