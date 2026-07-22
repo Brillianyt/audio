@@ -544,7 +544,17 @@ Fusion 头：MLP(5→16→1)，seen/unseen 分别训练，输入 `[p_aa, p_at, c
 - [ ] 用 OHEM v3 正确 hard neg 训练 AT
 - [ ] 生成最终 submission（当前 submission.csv 已就绪基于 PhonemeBiGRU AT）
 
-### 0.82 → 0.9 的路径（待达到 0.82 后实施）
+### 关键消融结论 (2026-07-22)
+
+| 配置 | Unseen ep1 | Unseen ep2 | 结论 |
+|------|-----------|-----------|------|
+| CharBiGRU + cosine (原版) | 0.66 | 0.69 | ✅ 最佳 |
+| PhonemeBiGRU + cosine | 0.50 | 0.49 | ❌ 音素不如字符 |
+| CharBiGRU + comparison head | 0.49 | 0.46 | ❌ 比较头对AT无效 |
+
+**AA 天花板 0.806 的秘密**：comparison head (`[ea,qa,ea*qa,\|ea-qa\|]` → MLP → BCE)，冻结 Whisper + 真噪声库 + 不对称噪声。但这些差异在 root 版中未能复现。
+
+## 0.82 → 0.9 的路径（待达到 0.82 后实施）
 
 1. **在线边际挖矿**：每 batch 动态算相似度矩阵，保留 `cos > 0.5 的负例` 和 `cos < 0.3 的正例`，hard 样本 loss ×2.0，简单样本 ×0.3
 2. **边际惩罚（Margin）**：从 BCE 升级为 `max(0, margin - pos_cos + neg_cos)`，cos_scale 从 8 降到 4
