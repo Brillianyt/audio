@@ -293,10 +293,8 @@ class AudioTextModel(nn.Module):
     def forward(self, e, texts):
         ea = self.encoder(e)
         et, _ = self.text_enc(texts)
-        feat = torch.cat([ea, et, ea * et, (ea - et).abs()], dim=-1)
-        logit = self.head(feat).squeeze(-1)
         cos = (ea * et).sum(-1)
-        return cos, logit, ea, et
+        return cos, cos, ea, et  # (cos, score_for_BCE, ea, et)
 
 
 # ═══════════ PhonemeBiGRU ═══════════
@@ -772,16 +770,11 @@ def train_text(cfg, args):
             snr = np.random.uniform(-5,10); nl=10**(-snr/20)
             q = q+nl*torch.randn_like(q)*q.std(-1,keepdim=True)
 
-            # Comparison head: [ea, et, ea*et, |ea-et|] → logit
-            cos_ae, logit, ea, et = model(e, txts)
-            loss = F.binary_cross_entropy_with_logits(logit, y,
+            cos_ae, score, ea, et = model(e, txts)
+            loss = F.binary_cross_entropy_with_logits(score * cfg.cos_scale, y,
                        pos_weight=torch.tensor(cfg.pos_weight, device=device))
-            # Negative centering: push neg cos mean < -0.05
             pos = (y==1); neg = (y==0)
             _cp = cos_ae[pos]; _cn = cos_ae[neg]
-            if neg.any(): loss = loss + 0.5 * F.relu(_cn.mean() + 0.05)
-            c_pv = _cp.mean().item() if pos.any() else 0.0
-            c_nv = _cn.mean().item() if neg.any() else 0.0
             opt.zero_grad(); loss.backward(); opt.step()
             ls+=loss.item(); n+=1
             cs_pos += c_pv; cs_neg += c_nv; cs_n += 1
@@ -789,17 +782,17 @@ def train_text(cfg, args):
             cs_neg_std += _cn.std().item() if neg.any() and _cn.numel() > 1 else 0
             all_cos_pos.append(_cp.detach().cpu()); all_cos_neg.append(_cn.detach().cpu())
             if cs_n % 50 == 0:
-                print(f"  [ep{ep}] b{cs_n} loss={ls/n:.3f} cos+={cs_pos/cs_n:.3f}±{cs_pos_std/cs_n:.2f} "
-                      f"cos-={cs_neg/cs_n:.3f}±{cs_neg_std/cs_n:.2f} gap={cs_pos/cs_n-cs_neg/cs_n:.3f}")
-            del cos_ae,logit,ea,et,e,q,y,loss,_cp,_cn
+                print(f"  [ep{ep}] b{cs_n} loss={ls/n:.3f} cos+={cs_pos/cs_n:.3f} cos-={cs_neg/cs_n:.3f} "
+                      f"gap={cs_pos/cs_n-cs_neg/cs_n:.3f}")
+            del cos_ae,score,ea,et,e,q,y,loss,_cp,_cn
 
         @torch.no_grad()
         def ev(ld):
             model.eval(); ps,ls,ids,all_cs=[],[],[],[]
             for e,q,y,txts,id_ in ld:
                 e,q=e.to(device),q.to(device)
-                _, logit, _, _ = model(e, txts)
-                ps.append(torch.sigmoid(logit).cpu().numpy())
+                cos, _, _, _ = model(e, txts)
+                ps.append(torch.sigmoid(cos * cfg.cos_scale).cpu().numpy())
                 ls.append(y.numpy()); ids.extend(id_)
                 all_cs.append(logit.cpu().numpy())
             return roc_auc_score(np.concatenate(ls), np.concatenate(ps)), np.concatenate(ps), np.concatenate(ls), ids, np.concatenate(all_cs)
