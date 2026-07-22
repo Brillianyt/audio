@@ -266,8 +266,9 @@ class AudioAudioModel(nn.Module):
 # ═══════════ Model B: Audio-Text ═══════════
 
 class AudioTextModel(nn.Module):
-    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False, use_phoneme=False):
+    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False, use_phoneme=False, use_head=False):
         super().__init__()
+        self.use_head = use_head
         self.encoder = WhisperEncoder("base", embed_dim, unfreeze)
         if use_phoneme:
             self.text_enc = PhonemeBiGRUEncoder(embed_dim)
@@ -275,15 +276,13 @@ class AudioTextModel(nn.Module):
             self.text_enc = CharBiGRU64(embed_dim)
         else:
             self.text_enc = CharBiGRUEncoder(embed_dim)
-        # Comparison head: [ea, et, ea*et, |ea-et|] → logit (same as AA)
-        d = embed_dim
-        self.head = nn.Sequential(
-            nn.Linear(d * 4, d),
-            nn.ReLU(), nn.BatchNorm1d(d), nn.Dropout(0.1),
-            nn.Linear(d, 64),
-            nn.ReLU(), nn.BatchNorm1d(64),
-            nn.Linear(64, 1),
-        )
+        if use_head:
+            d = embed_dim
+            self.head = nn.Sequential(
+                nn.Linear(d * 4, d), nn.ReLU(), nn.BatchNorm1d(d), nn.Dropout(0.1),
+                nn.Linear(d, 64), nn.ReLU(), nn.BatchNorm1d(64),
+                nn.Linear(64, 1),
+            )
         if ckpt_path and os.path.isfile(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             enc_state = {k.replace("encoder.",""): v for k,v in ckpt["model"].items()
@@ -294,7 +293,11 @@ class AudioTextModel(nn.Module):
         ea = self.encoder(e)
         et, _ = self.text_enc(texts)
         cos = (ea * et).sum(-1)
-        return cos, cos, ea, et  # (cos, score_for_BCE, ea, et)
+        if self.use_head:
+            feat = torch.cat([ea, et, ea * et, (ea - et).abs()], dim=-1)
+            logit = self.head(feat).squeeze(-1)
+            return cos, logit, ea, et
+        return cos, cos * 8.0, ea, et  # second = score for BCE
 
 
 # ═══════════ PhonemeBiGRU ═══════════
@@ -727,7 +730,7 @@ def train_text(cfg, args):
     dv_u = dev_ld(cfg.dev_unseen_zip, cfg.dev_unseen_csv)
 
     uf = 0 if args.small_te else cfg.unfreeze_layers
-    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te, use_phoneme=args.phoneme).to(device)
+    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te, use_phoneme=args.phoneme, use_head=args.head).to(device)
     best, start_ep = -1.0, 1
     if args.resume:
         latest = os.path.join(out_dir, "latest.pt")
@@ -858,6 +861,7 @@ def main():
     p.add_argument("--pk", action="store_true", help="use PK sampling (32×4 pos + 128 neg per batch)")
     p.add_argument("--unfreeze", type=int, default=cfg.unfreeze_layers, help="unfreeze layers")
     p.add_argument("--phoneme", action="store_true", help="use PhonemeBiGRU (CMU dict)")
+    p.add_argument("--head", action="store_true", help="use comparison head for AT")
     args = p.parse_args()
     cfg.epochs = args.epochs; cfg.lr = args.lr; cfg.batch_size = args.bs; cfg.unfreeze_layers = args.unfreeze
 
