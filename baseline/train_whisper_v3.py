@@ -95,7 +95,7 @@ class WhisperConfigV3:
     seed: int = 42
     log_every: int = 10            # ↓ (v3: batch 更多，log 频率降低)
     subset: int = 500000
-    lambda_proto: float = 0.0        # 先关掉，验证 BCE-only 能否泛化
+    lambda_proto: float = 1.0        # Angular Prototypical loss weight (model learns multiplier)
     specaug_freq: int = 10          # 保守: 验证任务不可破坏共振峰
     specaug_time: int = 50
     noise_aug: bool = False
@@ -490,6 +490,7 @@ class MultiTaskWhisperKWSV3(nn.Module):
                                         max_audio_sec=max_audio_sec)
         self.scale = nn.Parameter(torch.tensor(4.0))
         self.bias = nn.Parameter(torch.tensor(0.0))
+        self.lambda_proto = nn.Parameter(torch.tensor(0.3))  # learnable loss coefficient
 
     def forward(self, enroll_wav, query_wav):
         e = self.encoder(enroll_wav)
@@ -925,7 +926,7 @@ def train(args, cfg: WhisperConfigV3):
                 texts_cat = w_e_list + w_q_list
                 loss_embed = crit_embed(emb_cat, texts_cat)
 
-            loss = (loss_bce + cfg.lambda_proto * loss_embed) / cfg.grad_accum
+            loss = (loss_bce + model.lambda_proto * loss_embed) / cfg.grad_accum
             scaler.scale(loss).backward()
 
             losses["bce"] += loss_bce.item()
