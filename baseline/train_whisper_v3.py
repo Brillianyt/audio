@@ -1398,9 +1398,10 @@ if __name__ == "__main__":
 #   [epoch 8]  seen=0.7837 unseen=0.5018
 #   [epoch 9]  seen=0.7832 unseen=0.5047 (best mean=0.6439)
 #   [epoch 10] seen=0.7821 unseen=0.5024
+#   [epoch 17] seen=0.7934 unseen=0.5075 (续训最佳, 20 epoch)
 #
 # 结论:
 #   - Angular Proto 比纯 BCE 提升 ~0.03 seen (0.75 → 0.78)
+#   - 续训到 20 epoch 最佳 seen=0.793
 #   - unseen 不受影响 (AA 天生不泛化)
-#   - 可学习 lambda 稳定在 0.3-0.4
 # ═══════════════════════════════════════════════════════════════════
