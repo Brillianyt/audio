@@ -540,11 +540,15 @@ Fusion 头：MLP(5→16→1)，seen/unseen 分别训练，输入 `[p_aa, p_at, c
 
 ### 待办
 
-- [ ] **音频补静音（待施工）** — 参考文章发现音频前后各补 0.5~0.75s 静音使空转写率从 84% 降到 12%，AUC 从 0.58 提升到 0.75。当前所有模型（AA 和 AT）均未做此预处理，预计有显著提升
-- [ ] GPU 恢复后下载 LibriSpeech，用 `train_dual.py --mode text` 复现 AT v2（CharBiGRU, unseen 0.75）
+- [ ] **音频补静音（待施工）** — 参考文章发现音频前后各补 0.5~0.75s 静音使空转写率从 84% 降到 12%，AUC 从 0.58 提升到 0.75
 - [ ] 用 OHEM v3 正确 hard neg 训练 AT
-- [ ] 生成最终 submission（当前 submission.csv 已就绪但基于 PhonemeBiGRU AT）
-- 目标：seen AUC 0.7+
+- [ ] 生成最终 submission（当前 submission.csv 已就绪基于 PhonemeBiGRU AT）
+
+### 0.82 → 0.9 的路径（待达到 0.82 后实施）
+
+1. **在线边际挖矿**：每 batch 动态算相似度矩阵，保留 `cos > 0.5 的负例` 和 `cos < 0.3 的正例`，hard 样本 loss ×2.0，简单样本 ×0.3
+2. **边际惩罚（Margin）**：从 BCE 升级为 `max(0, margin - pos_cos + neg_cos)`，cos_scale 从 8 降到 4
+3. **长短词校准**：比较头加入 `(ea.norm() - et.norm())` 作为额外特征
 
 ### 第二阶段：AT 用 OHEM 硬负样本
 - 数据：原始 pos + OHEM 模型误判 hard neg + hard pos
