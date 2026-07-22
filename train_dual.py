@@ -1,7 +1,7 @@
 """Dual-Encoder Training — audio-audio + audio-text independently.
 
-Model A: Whisper → SupCon (supervised contrastive) on all batch embeddings
-Model B: Whisper + TextEnc → BCE + alignment
+	# Model A: Whisper → attn-pool → comparison head → pairwise BCE + negative centering
+# Model B: Whisper + TextEnc → BCE + alignment
 
 Trains separately, combines at inference.
 No fusion MLP, no multi-task entanglement.
@@ -305,25 +305,26 @@ class PhonemeBiGRUEncoder(nn.Module):
     """CMU phoneme → BiGRU text encoder."""
     def __init__(self, dim=256):
         super().__init__()
+        import cmudict as _cd
+        self.cmu = _cd.dict()
         self.emb = nn.Embedding(40, dim)
         self.gru = nn.GRU(dim, dim, batch_first=True, bidirectional=True, num_layers=2, dropout=0.1)
         self.proj = nn.Linear(dim*2, dim)
+        self.PV = ["AA","AE","AH","AO","AW","AY","B","CH","D","DH","EH","ER","EY","F","G",
+                    "HH","IH","IY","JH","K","L","M","N","NG","OW","OY","P","R","S","SH",
+                    "T","TH","UH","UW","V","W","Y","Z","ZH","UNK"]
+        self.P2I = {p:i for i,p in enumerate(self.PV)}
 
     def forward(self, texts):
-        import re, cmudict as _cd
+        import re
         device = next(self.parameters()).device
         if not texts: return torch.zeros(0, 256, device=device), None
-        cmu = _cd.dict()
         def w2p(w):
             w = w.lower().strip("'s\"-.,!?;:")
             if not w: return []
-            pl = cmu.get(w)
+            pl = self.cmu.get(w)
             return [re.sub(r'[0-2]$','',p) for p in pl[0]] if pl else []
-        PV = ["AA","AE","AH","AO","AW","AY","B","CH","D","DH","EH","ER","EY","F","G",
-              "HH","IH","IY","JH","K","L","M","N","NG","OW","OY","P","R","S","SH",
-              "T","TH","UH","UW","V","W","Y","Z","ZH","UNK"]
-        P2I = {p:i for i,p in enumerate(PV)}
-        ph_lists = [[P2I.get(p,39) for p in w2p(t)] or [39] for t in texts]
+        ph_lists = [[self.P2I.get(p,39) for p in w2p(t)] or [39] for t in texts]
         mx = max(len(p) for p in ph_lists)
         idx = torch.zeros(len(texts), mx, dtype=torch.long, device=device)
         for i, ph in enumerate(ph_lists):
@@ -444,10 +445,10 @@ def load_pairs(csv_path):
     return rows
 
 
-# ═══════════ Training: Audio-Audio (SupCon) ═══════════
+# ═══════════ Training: Audio-Audio (BCE + comparison head) ═══════════
 
 def train_audio(cfg, args):
-    """Model A: audio-audio — SupCon loss on full batch embedding matrix."""
+    """Model A: audio-audio — pairwise BCE on comparison head + negative centering."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(cfg.seed); np.random.seed(cfg.seed)
     out_dir = os.path.join(PATHS.root, "output", f"dual_{args.name}_audio")
@@ -767,18 +768,19 @@ def train_text(cfg, args):
         all_cos_pos, all_cos_neg = [], []
         for e,q,y,txts,_ in loader:
             e,q,y = e.to(device),q.to(device),y.to(device)
-            snr = np.random.uniform(-10,5); nl=10**(-snr/20)
+            snr = np.random.uniform(-5,10); nl=10**(-snr/20)
             e = e+nl*torch.randn_like(e)*e.std(-1,keepdim=True)
-            snr = np.random.uniform(-10,5); nl=10**(-snr/20)
+            snr = np.random.uniform(-5,10); nl=10**(-snr/20)
             q = q+nl*torch.randn_like(q)*q.std(-1,keepdim=True)
 
             # Comparison head: [ea, et, ea*et, |ea-et|] → logit
             cos_ae, logit, ea, et = model(e, txts)
             loss = F.binary_cross_entropy_with_logits(logit, y,
                        pos_weight=torch.tensor(cfg.pos_weight, device=device))
-
+            # Negative centering: push neg cos mean < -0.05
             pos = (y==1); neg = (y==0)
             _cp = cos_ae[pos]; _cn = cos_ae[neg]
+            if neg.any(): loss = loss + 0.5 * F.relu(_cn.mean() + 0.05)
             c_pv = _cp.mean().item() if pos.any() else 0.0
             c_nv = _cn.mean().item() if neg.any() else 0.0
             opt.zero_grad(); loss.backward(); opt.step()
