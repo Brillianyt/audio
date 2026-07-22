@@ -799,7 +799,7 @@ def train_text(cfg, args):
                 cos, _, _, _ = model(e, txts)
                 ps.append(torch.sigmoid(cos * cfg.cos_scale).cpu().numpy())
                 ls.append(y.numpy()); ids.extend(id_)
-                all_cs.append(logit.cpu().numpy())
+                all_cs.append(cos.cpu().numpy())
             return roc_auc_score(np.concatenate(ls), np.concatenate(ps)), np.concatenate(ps), np.concatenate(ls), ids, np.concatenate(all_cs)
 
         as_, ps_s, ls_s, ids_s, css_s = ev(dv_s)
