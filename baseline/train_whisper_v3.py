@@ -852,7 +852,7 @@ def train(args, cfg: WhisperConfigV3):
     # ── 模型 ──
     t0 = time.time()
     resume_ep = 0
-    best, best_ep = -1.0, 0
+    best_unseen, best_ep = -1.0, 0
 
     if args.resume and os.path.isfile(latest_path):
         ckpt = torch.load(latest_path, map_location="cpu", weights_only=False)
@@ -1228,7 +1228,7 @@ def train_text_mode(args, cfg):
     # Model
     model = WhisperTextKWS(text_ckpt, cfg.embed_dim,
                            unfreeze_whisper=args.unfreeze_whisper).to(device)
-    best, best_ep = -1.0, 0
+    best_unseen, best_ep = -1.0, 0
 
     # Load text checkpoint as starting point
     if args.load_text and os.path.isfile(args.load_text):
@@ -1331,12 +1331,12 @@ def train_text_mode(args, cfg):
         auc_s = ev(dev_s); auc_u = ev(dev_u)
         print(f"[ep {ep}] seen={auc_s:.4f} unseen={auc_u:.4f} "
               f"mean={(auc_s+auc_u)/2:.4f} ({time.time()-t_ep:.0f}s)")
-        if auc_u > best:
-            best, best_ep = auc_u, ep
+        if auc_s > best_seen:
+            best_seen, best_ep = auc_s, ep
             torch.save({"model": model.state_dict(), "auc_seen": auc_s,
                          "auc_unseen": auc_u, "whisper_ckpt": text_ckpt},
                        os.path.join(out_dir, "best.pt"))
-            print(f"  [best] unseen={auc_u:.4f}")
+            print(f"  [best] seen={auc_s:.4f}")
 
     print(f"\n[done] best_unseen={best:.4f} (ep{best_ep}), {time.time()-t0:.0f}s")
 
