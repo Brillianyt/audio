@@ -297,7 +297,9 @@ class AudioTextModel(nn.Module):
         sim_t = (et * eq).sum(-1)
         w_a = torch.exp(-self.log_var_a)
         w_t = torch.exp(-self.log_var_t)
-        score = w_a * sim_a + w_t * sim_t + self.bias
+        # Norm calibration: penalize mismatched magnitudes (short vs long words)
+        norm_diff = (ea.norm(dim=-1) - et.norm(dim=-1)).abs()
+        score = w_a * sim_a + w_t * sim_t + 0.05 * (1.0 - norm_diff) + self.bias
         cos = sim_t  # monitor text matching
         return cos, score, ea, et
 
@@ -776,8 +778,12 @@ def train_text(cfg, args):
             q = q+nl*torch.randn_like(q)*q.std(-1,keepdim=True)
 
             cos_ae, score, ea, et = model(e, txts, q)
-            loss = F.binary_cross_entropy_with_logits(score, y,
-                       pos_weight=torch.tensor(cfg.pos_weight, device=device))
+            # Online mining: reweight based on current difficulty
+            p = torch.sigmoid(score)
+            hard = ((y == 0) & (p > 0.5)) | ((y == 1) & (p < 0.3))
+            weight = torch.where(hard, 2.0, 0.3)
+            loss = F.binary_cross_entropy_with_logits(score, y, reduction='none')
+            loss = (loss * weight).mean()
             pos = (y==1); neg = (y==0)
             _cp = cos_ae[pos]; _cn = cos_ae[neg]
             c_pv = _cp.mean().item() if pos.any() else 0.0
