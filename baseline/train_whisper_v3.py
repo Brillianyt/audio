@@ -1386,3 +1386,21 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ═══════════════════════════════════════════════════════════════════
+# 实验结果记录 (2026-07-22)
+#
+# 实验名称: aa_v3 (baseline/train_whisper_v3.py)
+# 配置:  --unfreeze-whisper 4 --epochs 10 --bs 64
+# 损失: BCE + Angular Prototypical (learnable lambda_proto=0.3 init)
+#
+# 最终效果:
+#   [epoch 8]  seen=0.7837 unseen=0.5018
+#   [epoch 9]  seen=0.7832 unseen=0.5047 (best mean=0.6439)
+#   [epoch 10] seen=0.7821 unseen=0.5024
+#
+# 结论:
+#   - Angular Proto 比纯 BCE 提升 ~0.03 seen (0.75 → 0.78)
+#   - unseen 不受影响 (AA 天生不泛化)
+#   - 可学习 lambda 稳定在 0.3-0.4
+# ═══════════════════════════════════════════════════════════════════

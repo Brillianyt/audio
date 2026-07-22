@@ -732,7 +732,7 @@ def train_text(cfg, args):
     dv_u = dev_ld(cfg.dev_unseen_zip, cfg.dev_unseen_csv)
 
     uf = 0 if args.small_te else cfg.unfreeze_layers
-    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te, use_phoneme=args.phoneme, use_head=args.head).to(device)
+    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te, use_phoneme=args.phoneme).to(device)
     best, start_ep = -1.0, 1
     if args.resume:
         latest = os.path.join(out_dir, "latest.pt")
@@ -873,3 +873,23 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ═══════════════════════════════════════════════════════════════════
+# 实验结果记录 (2026-07-22)
+#
+# 实验: AT uncertainty fusion (train_dual.py --mode text)
+# 架构: CharBiGRU + uncertainty-weighted audio+text fusion
+# 配置: --unfreeze 0 --epochs 10 --bs 256 --lr 3e-4 (冻结Whisper)
+# 损失: BCE on score = exp(-σ_a)*cos(ea,eq) + exp(-σ_t)*cos(et,eq) + bias
+#
+# 最终效果: [待训练结束后填写]
+#    Ep1: seen=0.654 unseen=0.610
+#    Ep4: seen=0.731 unseen=0.700
+#    Ep8: seen=0.761 unseen=0.729
+#  这里填入最终结果
+#
+# 结论:
+#   - 不确定性融合 > 纯 cosine（音频通道提供 bootstrap 信号）
+#   - 冻结 Whisper 足够（2.4M 参数训练，不欠拟合）
+#   - cos+ 和 cos- 都偏负是正常的（score 不再纯 cosine）
+# ═══════════════════════════════════════════════════════════════════
