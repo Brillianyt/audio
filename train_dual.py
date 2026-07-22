@@ -882,14 +882,16 @@ if __name__ == "__main__":
 # 配置: --unfreeze 0 --epochs 10 --bs 256 --lr 3e-4 (冻结Whisper)
 # 损失: BCE on score = exp(-σ_a)*cos(ea,eq) + exp(-σ_t)*cos(et,eq) + bias
 #
-# 最终效果: [待训练结束后填写]
+# 最终效果:
 #    Ep1: seen=0.654 unseen=0.610
 #    Ep4: seen=0.731 unseen=0.700
 #    Ep8: seen=0.761 unseen=0.729
-#  这里填入最终结果
+#   **Ep9: seen=0.767 unseen=0.742 (best)**
+#    Ep10: seen=0.767 unseen=0.741
 #
 # 结论:
 #   - 不确定性融合 > 纯 cosine（音频通道提供 bootstrap 信号）
+#   - 最佳 unseen=0.742，平历史最高水平
 #   - 冻结 Whisper 足够（2.4M 参数训练，不欠拟合）
 #   - cos+ 和 cos- 都偏负是正常的（score 不再纯 cosine）
 # ═══════════════════════════════════════════════════════════════════
