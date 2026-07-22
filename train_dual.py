@@ -266,9 +266,8 @@ class AudioAudioModel(nn.Module):
 # ═══════════ Model B: Audio-Text ═══════════
 
 class AudioTextModel(nn.Module):
-    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False, use_phoneme=False, use_head=False):
+    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False, use_phoneme=False):
         super().__init__()
-        self.use_head = use_head
         self.encoder = WhisperEncoder("base", embed_dim, unfreeze)
         if use_phoneme:
             self.text_enc = PhonemeBiGRUEncoder(embed_dim)
@@ -276,28 +275,31 @@ class AudioTextModel(nn.Module):
             self.text_enc = CharBiGRU64(embed_dim)
         else:
             self.text_enc = CharBiGRUEncoder(embed_dim)
-        if use_head:
-            d = embed_dim
-            self.head = nn.Sequential(
-                nn.Linear(d * 4, d), nn.ReLU(), nn.BatchNorm1d(d), nn.Dropout(0.1),
-                nn.Linear(d, 64), nn.ReLU(), nn.BatchNorm1d(64),
-                nn.Linear(64, 1),
-            )
+        # Uncertainty weighting: learned precision for audio & text matching
+        self.log_var_a = nn.Parameter(torch.tensor(0.0))
+        self.log_var_t = nn.Parameter(torch.tensor(0.0))
+        self.bias = nn.Parameter(torch.tensor(0.0))
         if ckpt_path and os.path.isfile(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             enc_state = {k.replace("encoder.",""): v for k,v in ckpt["model"].items()
                          if k.startswith("encoder.")}
             self.encoder.load_state_dict(enc_state, strict=False)
 
-    def forward(self, e, texts):
+    def forward(self, e, texts, q=None):
         ea = self.encoder(e)
         et, _ = self.text_enc(texts)
         cos = (ea * et).sum(-1)
-        if self.use_head:
-            feat = torch.cat([ea, et, ea * et, (ea - et).abs()], dim=-1)
-            logit = self.head(feat).squeeze(-1)
-            return cos, logit, ea, et
-        return cos, cos * 8.0, ea, et  # second = score for BCE
+        if q is None:
+            return cos, cos * 8.0, ea, et
+        # Dual matching: audio-audio + text-audio, uncertainty weighted
+        eq = self.encoder(q)
+        sim_a = (ea * eq).sum(-1)
+        sim_t = (et * eq).sum(-1)
+        w_a = torch.exp(-self.log_var_a)
+        w_t = torch.exp(-self.log_var_t)
+        score = w_a * sim_a + w_t * sim_t + self.bias
+        cos = sim_t  # monitor text matching
+        return cos, score, ea, et
 
 
 # ═══════════ PhonemeBiGRU ═══════════
@@ -773,8 +775,8 @@ def train_text(cfg, args):
             snr = np.random.uniform(-5,10); nl=10**(-snr/20)
             q = q+nl*torch.randn_like(q)*q.std(-1,keepdim=True)
 
-            cos_ae, score, ea, et = model(e, txts)
-            loss = F.binary_cross_entropy_with_logits(score * cfg.cos_scale, y,
+            cos_ae, score, ea, et = model(e, txts, q)
+            loss = F.binary_cross_entropy_with_logits(score, y,
                        pos_weight=torch.tensor(cfg.pos_weight, device=device))
             pos = (y==1); neg = (y==0)
             _cp = cos_ae[pos]; _cn = cos_ae[neg]
@@ -796,8 +798,8 @@ def train_text(cfg, args):
             model.eval(); ps,ls,ids,all_cs=[],[],[],[]
             for e,q,y,txts,id_ in ld:
                 e,q=e.to(device),q.to(device)
-                cos, _, _, _ = model(e, txts)
-                ps.append(torch.sigmoid(cos * cfg.cos_scale).cpu().numpy())
+                cos, score, _, _ = model(e, txts, q)
+                ps.append(torch.sigmoid(score).cpu().numpy())
                 ls.append(y.numpy()); ids.extend(id_)
                 all_cs.append(cos.cpu().numpy())
             return roc_auc_score(np.concatenate(ls), np.concatenate(ps)), np.concatenate(ps), np.concatenate(ls), ids, np.concatenate(all_cs)
