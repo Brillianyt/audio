@@ -775,6 +775,8 @@ def train_text(cfg, args):
                        pos_weight=torch.tensor(cfg.pos_weight, device=device))
             pos = (y==1); neg = (y==0)
             _cp = cos_ae[pos]; _cn = cos_ae[neg]
+            c_pv = _cp.mean().item() if pos.any() else 0.0
+            c_nv = _cn.mean().item() if neg.any() else 0.0
             opt.zero_grad(); loss.backward(); opt.step()
             ls+=loss.item(); n+=1
             cs_pos += c_pv; cs_neg += c_nv; cs_n += 1
