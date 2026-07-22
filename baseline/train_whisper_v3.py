@@ -919,7 +919,9 @@ def train(args, cfg: WhisperConfigV3):
 
             with torch.amp.autocast("cuda", enabled=(device == "cuda")):
                 logit, e_emb, q_emb = model(e, q)
-                loss_bce = crit_bce(logit, y)
+                loss_bce = F.binary_cross_entropy_with_logits(logit, y, reduction="none")
+                hard = ((y == 0) & (torch.sigmoid(logit) > 0.5)) | ((y == 1) & (torch.sigmoid(logit) < 0.3))
+                loss_bce = (loss_bce * torch.where(hard, 2.0, 0.3)).mean()
 
                 # ArcFace: 在 embedding 空间做 P-way 分类（angular margin）
                 emb_cat = torch.cat([e_emb, q_emb])
