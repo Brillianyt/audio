@@ -266,11 +266,24 @@ class AudioAudioModel(nn.Module):
 # ═══════════ Model B: Audio-Text ═══════════
 
 class AudioTextModel(nn.Module):
-    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False):  # 自己的trainable whisper
+    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False, use_phoneme=False):
         super().__init__()
         self.encoder = WhisperEncoder("base", embed_dim, unfreeze)
-        self.text_enc = CharBiGRU64(embed_dim) if small_te else CharBiGRUEncoder(embed_dim)
-        self.log_var = nn.Parameter(torch.tensor(0.0))
+        if use_phoneme:
+            self.text_enc = PhonemeBiGRUEncoder(embed_dim)
+        elif small_te:
+            self.text_enc = CharBiGRU64(embed_dim)
+        else:
+            self.text_enc = CharBiGRUEncoder(embed_dim)
+        # Comparison head: [ea, et, ea*et, |ea-et|] → logit (same as AA)
+        d = embed_dim
+        self.head = nn.Sequential(
+            nn.Linear(d * 4, d),
+            nn.ReLU(), nn.BatchNorm1d(d), nn.Dropout(0.1),
+            nn.Linear(d, 64),
+            nn.ReLU(), nn.BatchNorm1d(64),
+            nn.Linear(64, 1),
+        )
         if ckpt_path and os.path.isfile(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             enc_state = {k.replace("encoder.",""): v for k,v in ckpt["model"].items()
@@ -280,7 +293,45 @@ class AudioTextModel(nn.Module):
     def forward(self, e, texts):
         ea = self.encoder(e)
         et, _ = self.text_enc(texts)
-        return (ea * et).sum(-1), ea, et
+        feat = torch.cat([ea, et, ea * et, (ea - et).abs()], dim=-1)
+        logit = self.head(feat).squeeze(-1)
+        cos = (ea * et).sum(-1)
+        return cos, logit, ea, et
+
+
+# ═══════════ PhonemeBiGRU ═══════════
+
+class PhonemeBiGRUEncoder(nn.Module):
+    """CMU phoneme → BiGRU text encoder."""
+    def __init__(self, dim=256):
+        super().__init__()
+        self.emb = nn.Embedding(40, dim)
+        self.gru = nn.GRU(dim, dim, batch_first=True, bidirectional=True, num_layers=2, dropout=0.1)
+        self.proj = nn.Linear(dim*2, dim)
+
+    def forward(self, texts):
+        import re, cmudict as _cd
+        device = next(self.parameters()).device
+        if not texts: return torch.zeros(0, 256, device=device), None
+        cmu = _cd.dict()
+        def w2p(w):
+            w = w.lower().strip("'s\"-.,!?;:")
+            if not w: return []
+            pl = cmu.get(w)
+            return [re.sub(r'[0-2]$','',p) for p in pl[0]] if pl else []
+        PV = ["AA","AE","AH","AO","AW","AY","B","CH","D","DH","EH","ER","EY","F","G",
+              "HH","IH","IY","JH","K","L","M","N","NG","OW","OY","P","R","S","SH",
+              "T","TH","UH","UW","V","W","Y","Z","ZH","UNK"]
+        P2I = {p:i for i,p in enumerate(PV)}
+        ph_lists = [[P2I.get(p,39) for p in w2p(t)] or [39] for t in texts]
+        mx = max(len(p) for p in ph_lists)
+        idx = torch.zeros(len(texts), mx, dtype=torch.long, device=device)
+        for i, ph in enumerate(ph_lists):
+            for j, pid in enumerate(ph[:mx]): idx[i,j] = pid
+        x = self.emb(idx)
+        _, h = self.gru(x)
+        h = torch.cat([h[-2], h[-1]], -1)
+        return F.normalize(self.proj(h), dim=-1), None
 
 
 # ═══════════ SupCon Loss ═══════════
@@ -678,7 +729,7 @@ def train_text(cfg, args):
     dv_u = dev_ld(cfg.dev_unseen_zip, cfg.dev_unseen_csv)
 
     uf = 0 if args.small_te else cfg.unfreeze_layers
-    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te).to(device)
+    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te, use_phoneme=args.phoneme).to(device)
     best, start_ep = -1.0, 1
     if args.resume:
         latest = os.path.join(out_dir, "latest.pt")
@@ -721,20 +772,13 @@ def train_text(cfg, args):
             snr = np.random.uniform(-10,5); nl=10**(-snr/20)
             q = q+nl*torch.randn_like(q)*q.std(-1,keepdim=True)
 
-            cos_ae,ea,et = model(e, txts)
-            scale = cfg.cos_scale
-            # cos(enroll_text, query_audio) vs label y
-            cos_tq = (et * model.encoder(q)).sum(-1)  # text ↔ query
-            margin = torch.tensor(0.0, device=device)
+            # Comparison head: [ea, et, ea*et, |ea-et|] → logit
+            cos_ae, logit, ea, et = model(e, txts)
+            loss = F.binary_cross_entropy_with_logits(logit, y,
+                       pos_weight=torch.tensor(cfg.pos_weight, device=device))
+
             pos = (y==1); neg = (y==0)
-            _cp = cos_tq[pos]; _cn = cos_tq[neg]
-            cos_pos_val = _cp.mean().item() if pos.any() else 0
-            cos_neg_val = _cn.mean().item() if neg.any() else 0
-            if pos.any(): margin += F.relu(0.6 - _cp).mean()
-            if neg.any(): margin += F.relu(_cn + 0.15).mean()  # push cos < -0.15
-            # Also: enroll_audio should match enroll_text (auxiliary)
-            margin += F.relu(0.6 - cos_ae).mean()
-            loss = crit(cos_tq * scale, y) + 0.1 * margin + 0.2 * F.mse_loss(et, ea)
+            _cp = cos_ae[pos]; _cn = cos_ae[neg]
             opt.zero_grad(); loss.backward(); opt.step()
             ls+=loss.item(); n+=1
             cs_pos += cos_pos_val; cs_neg += cos_neg_val; cs_n += 1
@@ -751,11 +795,10 @@ def train_text(cfg, args):
             model.eval(); ps,ls,ids,all_cs=[],[],[],[]
             for e,q,y,txts,id_ in ld:
                 e,q=e.to(device),q.to(device)
-                cs,_,et = model(e, txts)
-                cs = (et * model.encoder(q)).sum(-1)
-                ps.append(torch.sigmoid(cs * scale).cpu().numpy())
+                _, logit, _, _ = model(e, txts)
+                ps.append(torch.sigmoid(logit).cpu().numpy())
                 ls.append(y.numpy()); ids.extend(id_)
-                all_cs.append(cs.cpu().numpy())
+                all_cs.append(logit.cpu().numpy())
             return roc_auc_score(np.concatenate(ls), np.concatenate(ps)), np.concatenate(ps), np.concatenate(ls), ids, np.concatenate(all_cs)
 
         as_, ps_s, ls_s, ids_s, css_s = ev(dv_s)
@@ -816,6 +859,7 @@ def main():
     p.add_argument("--small-te", action="store_true", help="use 64d CharBiGRU")
     p.add_argument("--pk", action="store_true", help="use PK sampling (32×4 pos + 128 neg per batch)")
     p.add_argument("--unfreeze", type=int, default=cfg.unfreeze_layers, help="unfreeze layers")
+    p.add_argument("--phoneme", action="store_true", help="use PhonemeBiGRU (CMU dict)")
     args = p.parse_args()
     cfg.epochs = args.epochs; cfg.lr = args.lr; cfg.batch_size = args.bs; cfg.unfreeze_layers = args.unfreeze
 
