@@ -779,16 +779,18 @@ def train_text(cfg, args):
 
             pos = (y==1); neg = (y==0)
             _cp = cos_ae[pos]; _cn = cos_ae[neg]
+            c_pv = _cp.mean().item() if pos.any() else 0.0
+            c_nv = _cn.mean().item() if neg.any() else 0.0
             opt.zero_grad(); loss.backward(); opt.step()
             ls+=loss.item(); n+=1
-            cs_pos += cos_pos_val; cs_neg += cos_neg_val; cs_n += 1
+            cs_pos += c_pv; cs_neg += c_nv; cs_n += 1
             cs_pos_std += _cp.std().item() if pos.any() else 0
             cs_neg_std += _cn.std().item() if neg.any() else 0
             all_cos_pos.append(_cp.detach().cpu()); all_cos_neg.append(_cn.detach().cpu())
             if cs_n % 50 == 0:
                 print(f"  [ep{ep}] b{cs_n} loss={ls/n:.3f} cos+={cs_pos/cs_n:.3f}±{cs_pos_std/cs_n:.2f} "
                       f"cos-={cs_neg/cs_n:.3f}±{cs_neg_std/cs_n:.2f} gap={cs_pos/cs_n-cs_neg/cs_n:.3f}")
-            del cos_ae,cos_tq,ea,et,e,q,y,loss,margin,_cp,_cn
+            del cos_ae,logit,ea,et,e,q,y,loss,_cp,_cn
 
         @torch.no_grad()
         def ev(ld):
