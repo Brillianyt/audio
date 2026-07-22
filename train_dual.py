@@ -556,8 +556,8 @@ def train_audio(cfg, args):
             cp_val = _cp.mean().item() if pos.any() else 0.0
             cn_val = _cn.mean().item() if neg.any() else 0.0
             cs_pos += cp_val; cs_neg += cn_val; cs_n += 1
-            cs_pos_std += _cp.std().item() if pos.any() else 0.0
-            cs_neg_std += _cn.std().item() if neg.any() else 0.0
+            cs_pos_std += _cp.std().item() if pos.any() and _cp.numel() > 1 else 0.0
+            cs_neg_std += _cn.std().item() if neg.any() and _cn.numel() > 1 else 0.0
             all_cos_pos.append(_cp.detach().cpu())
             all_cos_neg.append(_cn.detach().cpu())
 
@@ -784,8 +784,8 @@ def train_text(cfg, args):
             opt.zero_grad(); loss.backward(); opt.step()
             ls+=loss.item(); n+=1
             cs_pos += c_pv; cs_neg += c_nv; cs_n += 1
-            cs_pos_std += _cp.std().item() if pos.any() else 0
-            cs_neg_std += _cn.std().item() if neg.any() else 0
+            cs_pos_std += _cp.std().item() if pos.any() and _cp.numel() > 1 else 0
+            cs_neg_std += _cn.std().item() if neg.any() and _cn.numel() > 1 else 0
             all_cos_pos.append(_cp.detach().cpu()); all_cos_neg.append(_cn.detach().cpu())
             if cs_n % 50 == 0:
                 print(f"  [ep{ep}] b{cs_n} loss={ls/n:.3f} cos+={cs_pos/cs_n:.3f}±{cs_pos_std/cs_n:.2f} "
