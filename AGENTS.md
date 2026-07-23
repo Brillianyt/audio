@@ -23,80 +23,13 @@
 | 组件 | 技术 |
 |------|------|
 | 深度学习框架 | PyTorch 2.0+, torchaudio |
-| 音频编码器 | OpenAI Whisper (base), Microsoft WavLM (base-plus) |
-| 文本编码器 | Char-level BiGRU, Phoneme RoPE Transformer, CMU Pronouncing Dictionary |
+| 音频编码器 | OpenAI Whisper (base) |
+| 文本编码器 | Char-level BiGRU |
 | 数据处理 | soundfile, zipfile (从 zip 读取 WAV), numpy |
 | 评估指标 | scikit-learn roc_auc_score |
 | 依赖管理 | requirements.txt (pip) |
 | 音频增强 | Gaussian noise, SpecAugment |
 
-## 目录结构
-
-```
-keyword_detect/
-├── baseline/                    # 所有训练/推理/数据生成脚本
-│   ├── config.py                # 全局路径和基础配置 (AudioConfig/TrainConfig/Paths)
-│   ├── data.py                  # 数据集类和数据加载工具 (PairDataset, read_wav, add_noise, LogMel)
-│   ├── model.py                 # 孪生 CNN 基线模型 (SiameseKWS)
-│   ├── train.py                 # 孪生 CNN 训练脚本
-│   ├── infer.py                 # 孪生 CNN 推理脚本
-│   ├── train_whisper_v3.py      # Whisper V3 训练 (BCE + Angular Prototypical + PK Sampler)
-│   ├── train_wavlm.py           # WavLM 训练 (含文本融合、音素辅助损失)
-│   ├── train_wavlm_bare.py      # WavLM 纯声学训练 (不含文本分支)
-│   ├── train_dual.py (副本)     # 双编码器训练的 baseline 副本
-│   ├── ensemble_infer.py        # 双编码器集成推理 (含权重校准)
-│   ├── infer_text.py            # Whisper+Text 模式推理
-│   ├── gen_pairs.py             # 自配对训练数据生成器 (同词正样本/异词负样本)
-│   ├── gen_pairs_external.py    # 外部语音命令数据集 → 训练 pair JSON
-│   ├── hard_neg.py              # 基于编辑距离的难负样本挖掘器
-│   ├── hard_neg_phoneme.py      # 纯音素编辑距离难负样本挖掘 (CMU dict)
-│   ├── build_hard_neg.py        # 基于 Embedding 的难负样本挖掘 (通用)
-│   ├── build_hard_neg_wavlm.py  # WavLM Embedding 难负样本挖掘
-│   ├── mine_phoneme.py          # 全词表音素编辑距离难负样本挖掘
-│   ├── iter_hard_neg.py         # 迭代式难负样本挖掘 (Whisper+Text 模型)
-│   ├── precompute_whisper_emb.py# 预计算 Whisper Embedding 缓存
-│   ├── hard_neg_whisper.json    # 预计算的 Whisper 难负样本
-│   ├── hard_neg_iter1.json      # 迭代挖掘的难负样本
-│   ├── hard_neg_iter2.json      # 迭代挖掘的难负样本 (v2)
-│   └── checkpoints/             # 基线模型保存目录
-├── train_dual.py                # 主训练脚本 — 双编码器 (Audio-Audio + Audio-Text)
-├── train/                       # 训练数据
-│   ├── wav.zip                  # 训练音频 (zip 包)
-│   ├── train_label.csv          # 训练标签 (id, label, enroll_txt, query_txt)
-│   ├── self_paired.json         # 自配对生成的训练样本
-│   └── external_pairs.json      # 外部数据生成的训练样本
-├── dev/                         # 开发集 (有标签)
-│   ├── dev_seen/                # 已见词开发集
-│   └── dev_unseen/              # 未见词开发集
-├── eval/                        # 测试集 (无标签，用于最终提交)
-│   ├── eval_seen/               # 已见词测试集
-│   └── eval_unseen/             # 未见词测试集
-├── evalcsv_without_label/       # 测试集 CSV (id, enroll_txt)
-├── backward/                    # 逆向噪声音频
-├── datasets/                    # 外部数据集
-│   ├── noise/                   # 噪声音频
-│   └── wham/                    # WHAM 噪声
-├── wavlm/                       # WavLM 本地模型文件
-│   ├── config.json              # WavLM 模型配置
-│   ├── configuration.json
-│   ├── preprocessor_config.json
-│   └── pytorch_model.bin        # WavLM 权重
-├── output/                      # 训练输出目录
-│   ├── dual_aa_v1_audio/        # Audio-Audio 模型输出
-│   ├── dual_r2_init_text/       # Audio-Text 模型输出
-│   ├── whisper_v3_proto/        # Whisper v3 训练输出
-│   └── ... (多个实验输出)
-├── egs/                         # 示例脚本
-│   ├── cal_auc.py               # AUC 本地计算脚本
-│   ├── example.csv              # 示例提交文件
-│   └── README.md                # 使用说明
-├── requirements.txt             # Python 依赖
-├── submit_sample.csv            # 提交样例
-├── train_noise_bank.pt          # 噪声缓存
-├── .gitattributes               # Git LFS 配置
-├── musan.tar.gz / *.tar.gz      # MUSAN 噪声数据集
-└── README.md                    # 比赛任务说明 (中文)
-```
 
 ## 核心模型架构
 
@@ -113,16 +46,13 @@ keyword_detect/
 - 增强：每步随机高斯噪声 (-10~5 dB SNR)
 
 **Model B — Audio-Text (BCE)**:
+- 预处理：前后静音填充
 - 音频编码器：Whisper base (部分解冻，与 Model A 共享结构)
 - 文本编码器：CharBiGRUEncoder (28 字符嵌入 + 双向 GRU)
 - 匹配分数：`cos(enroll_text, query_audio)` + `cos(enroll_audio, enroll_text)` 对齐
 - 损失函数：BCEWithLogitsLoss (pos_weight=5.0) + margin loss + MSE alignment
 - 学习率分组：Whisper params lr/5，其他 lr=1e-3
 
-**推理集成**：
-- `ensemble_infer.py` 分别加载 AA 和 AT 模型
-- 在开发集上网格搜索最佳集成权重（seen/unseen 分别搜索）
-- 输出加权后验概率: `p = w * p_aa + (1-w) * p_at`
 
 ### 2. Whisper V3 基线 (`baseline/train_whisper_v3.py`)
 
@@ -134,13 +64,6 @@ keyword_detect/
 - **SpecAugment**：频率/时间掩码
 - **WhisperTextKWS**：Whisper 编码器 + Phoneme RoPE Transformer 文本分支，不确定性加权融合
 
-### 3. WavLM 基线 (`baseline/train_wavlm.py`, `train_wavlm_bare.py`)
-
-- **WavLMEncoder**：microsoft/wavlm-base-plus，7 层 CNN 特征提取器冻结 + 12 层 Transformer 部分解冻
-- **加权层求和**：可学习的 12 层权重，融合所有 Transformer 层输出
-- **PhonemeTextEncoder**：40 音素词汇表 + 注意力池化
-- **融合分类器**：6×embed_dim → embed_dim → 64 → 1 (含 batch norm)
-- **PhonemeAwarePKSampler**：按音素距离优先采样相似词作为 batch 内负样本
 
 ### 4. 孪生 CNN 基线 (`baseline/train.py`, `baseline/model.py`)
 
@@ -190,15 +113,6 @@ python train_dual.py --name aa_v1 --mode audio --resume
 python train_dual.py --name wavlm_aa --mode audio --encoder wavlm
 ```
 
-### 集成推理
-
-```bash
-python baseline/ensemble_infer.py \
-    --aa-ckpt output/dual_aa_v1_audio/best.pt \
-    --at-ckpt output/dual_r2_init_text/best.pt \
-    --calibrate \
-    --out submission.csv
-```
 
 ### 基线模型训练
 
@@ -497,18 +411,8 @@ AA 对 seen 词自信，AT 对 unseen 自信。各自不自信时对方的权重
 
 ### 最重要发现：AT 正确架构是 CharBiGRU，不是 PhonemeBiGRU
 
-- **AT v2（CharBiGRU, 0.7446 unseen）才是最强 AT** — 训练脚本 `train_dual.py --mode text`
-- PhonemeBiGRU 是后来加的实验性改进（`train_at_v3.py`），从未达到 CharBiGRU 的性能
-- `output/backup/at_best.pt`（0.69）用的是 PhonemeBiGRU，不是最好的 AT
-- AT 最佳路径已删除（`output/dual_at_v2_text/best.pt`），需用 `train_dual.py --mode text` 重新训练
+- **/output/backup_final/at_v8_ep22_seen08131_unseen07808（CharBiGRU, 0.7889 unseen）才是最强 AT** — 训练脚本 
 
-**CharBiGRU vs PhonemeBiGRU：**
-| | AT v2 最佳 | 当前 backup |
-|------|------|------|
-| 文本编码 | CharBiGRU (28字符, 64d, **1层**) | PhonemeBiGRU (40音素, 256d, 2-4层) |
-| Whisper | **冻结** | 解冻 4 层 |
-| unseen | **0.7446** | 0.69 |
-| 数据 | 只用 hard neg | 混了 easy neg |
 
 ### AA 提升来自 SupCon + 降解冻，不是 frame attention
 
@@ -520,67 +424,7 @@ AA 对 seen 词自信，AT 对 unseen 自信。各自不自信时对方的权重
 
 **有效改进**：SupCon 损失 + 降解冻层数（6→2-3）。Frame attention 无贡献。
 
-### 最优集成结果
 
-| | AA | AT | Fusion |
-|------|------|------|------|
-| Seen | 0.787 | 0.674 | **0.793** |
-| Unseen | — | 0.691 | **0.692** |
-| Macro | — | — | **0.743** |
-
-Fusion 头：MLP(5→16→1)，seen/unseen 分别训练，输入 `[p_aa, p_at, conf_aa, conf_at, gap]`。
-
-### OHEM v3：正确的训练对挖掘（2026-07-21）
-
-在真实训练 pair 上跑 AT 模型打分，收集：
-- FP（label=0, score>0.3）：2549 对 — 模型判错的不同词
-- FN（label=1, score<0.3）：9159 对 — 模型认不出的同词
-
-⚠️ **此前 OHEM v1/v2 使用错误的 PhonemeBiGRU AT 模型挖掘，数据已删除。GPU 恢复后需用 CharBiGRU AT v2 重新挖掘。**
-
-### 待办
-
-- [ ] **音频补静音（待施工）** — 参考文章发现音频前后各补 0.5~0.75s 静音使空转写率从 84% 降到 12%，AUC 从 0.58 提升到 0.75
-- [ ] 用 OHEM v3 正确 hard neg 训练 AT
-- [ ] 生成最终 submission（当前 submission.csv 已就绪基于 PhonemeBiGRU AT）
-
-### 关键消融结论 (2026-07-22)
-
-| 配置 | Unseen ep1 | Unseen ep2 | 结论 |
-|------|-----------|-----------|------|
-| CharBiGRU + cosine (原版) | 0.66 | 0.69 | ✅ 最佳 |
-| PhonemeBiGRU + cosine | 0.50 | 0.49 | ❌ 音素不如字符 |
-| CharBiGRU + comparison head | 0.49 | 0.46 | ❌ 比较头对AT无效 |
-
-**AA 天花板 0.806 的秘密**：comparison head (`[ea,qa,ea*qa,\|ea-qa\|]` → MLP → BCE)，冻结 Whisper + 真噪声库 + 不对称噪声。但这些差异在 root 版中未能复现。
-
-## 0.82 → 0.9 的路径（待达到 0.82 后实施）
-
-1. **在线边际挖矿**：每 batch 动态算相似度矩阵，保留 `cos > 0.5 的负例` 和 `cos < 0.3 的正例`，hard 样本 loss ×2.0，简单样本 ×0.3
-2. **边际惩罚（Margin）**：从 BCE 升级为 `max(0, margin - pos_cos + neg_cos)`，cos_scale 从 8 降到 4
-3. **长短词校准**：比较头加入 `(ea.norm() - et.norm())` 作为额外特征
-
-### 第二阶段：AT 用 OHEM 硬负样本
-- 数据：原始 pos + OHEM 模型误判 hard neg + hard pos
-- 关键：负样本全部来自模型真实 false positive，不是静态 embedding 邻居
-- 损失：BCE(cos × 2, y) + margin
-- 目标：unseen AUC 0.65+
-
-### 第三阶段：集成
-- AA 拿 seen（声学记忆），AT 拿 unseen（跨模态泛化）
-- 动态 gate：谁 confidence 高听谁的
-- `final = (conf_aa × p_aa + conf_at × p_at) / (conf_aa + conf_at)`
-
-### AT vs AA 本质差异
-
-| | AT | AA |
-|------|------|------|
-| 输入 | enroll_text ↔ query_audio | enroll_audio ↔ query_audio |
-| 核心能力 | 跨模态泛化（音素→声学） | 声学模式匹配 |
-| 需要什么数据 | 模型误判的 hard neg | 同词不同音频即可 |
-| 泛化 unseen | 强 | 弱 |
-| 记忆 seen | 一般 | 强 |
-| 集成角色 | unseen 专家 | seen 专家 |
 
 ## 模型诊断与修复 (2026-07-19)
 
@@ -622,43 +466,11 @@ Fusion 头：MLP(5→16→1)，seen/unseen 分别训练，输入 `[p_aa, p_at, c
 
 **修复**：pos_weight 改为 2.0，配合减少过采样，等效 pos 权重略高，适合"宁可误唤醒不可漏唤醒"的 KWS 场景。
 
-### 📋 修复文件清单
 
-| 文件 | 修复内容 |
-|------|----------|
-| `train_at_v3.py` | eval 用 ComparisonHead、GRU 4→2、hard neg ×10→×2、噪声分档、pos_weight 2.0 |
-| `train_at_v13.py` | hard neg ×10→×2、噪声分档、pos_weight 2.0 |
-| `train_aa.py` | 噪声分档、hard neg ×5→×2、pos_weight 2.0 |
-
-### 保守预期收益
-
-仅 P0 修复（eval 一致性）预期 unseen AUC **+0.05~0.10**。配合 P1 修复（去过采样 + GRU 减层），有望冲击 **0.75+**。
 
 ## 后续计划（目标 dev AUC 0.9）
 
-### 数据方向
-
-- [x] 生成 XL self_paired（124万对）
-- [x] 生成补充正样本覆盖全部8351个词（7262对）
-- [x] 音素级难负例挖掘：用 CMU dict 的 edit distance 找发音相似词对
-- [x] Speech Commands v2 导入（32 新词）
-- [ ] 下载更多开源语音数据（需要更多磁盘）
-- [ ] 用 AT v3 模型再做一轮难负例挖掘（迭代优化）
-
-### 模型方向
-
-- [x] 恢复 CharBiGRU 到 256-dim, 2层 + dropout
-- [x] 添加比较头 (Linear(4*256→256→64→1))
-- [ ] 对比学习 + 多任务训练
-- [ ] 集成多个 AT 模型（不同 seed）
-
-### 训练策略
-
-- [ ] Cosine LR schedule with warmup
-- [x] 梯度裁剪 + AMP
-- [x] 每 epoch 重新洗牌唯一词对池
-- [x] 去重防止记忆
-- [ ] 用 AT v3 模型再迭代挖难负例
+由于目前的最佳模型AT V8，对于text  与 音损正常的 query audio之间的判断是较为可信的，然而若音损过度则难以分辨到底是真不一样还是假不一样，需要AA参与辅助判断，如何设计一种更好的模型依赖判断逻辑是值得思考的事情。
 
 - Khosla et al., "Supervised Contrastive Learning", NeurIPS 2020
 - Chung et al., "In Defence of Metric Learning for Speaker Recognition", Interspeech 2020

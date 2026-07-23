@@ -1,0 +1,95 @@
+[text] 761172 pairs
+  pos=160479 neg=600693
+  AT semidedup: 1142 pos keys, 170153 neg keys
+  [resume] from latest.pt epoch=25 best_unseen=0.7944
+  trainable=15,046,403
+  [ep25] b50 loss=0.028 cos+=0.666 cos-=-0.058 gap=0.724
+  [ep25] b100 loss=0.026 cos+=0.672 cos-=-0.057 gap=0.728
+  [ep25] b150 loss=0.024 cos+=0.673 cos-=-0.059 gap=0.732
+  [ep25] b200 loss=0.023 cos+=0.675 cos-=-0.059 gap=0.735
+  [ep25] b250 loss=0.023 cos+=0.677 cos-=-0.057 gap=0.734
+  [ep25] b300 loss=0.023 cos+=0.678 cos-=-0.056 gap=0.734
+  [ep25] b350 loss=0.023 cos+=0.678 cos-=-0.056 gap=0.733
+  [ep25] b400 loss=0.023 cos+=0.680 cos-=-0.054 gap=0.734
+  [ep25] b450 loss=0.022 cos+=0.683 cos-=-0.054 gap=0.736
+  [ep25] b500 loss=0.022 cos+=0.683 cos-=-0.054 gap=0.738
+  [ep25] b550 loss=0.022 cos+=0.686 cos-=-0.053 gap=0.739
+  [ep25] b600 loss=0.022 cos+=0.685 cos-=-0.053 gap=0.738
+[text ep25] seen=0.8048 unseen=0.7694 loss=0.0218 cos+=0.686±0.09 cos-=-0.052±0.21 overlap(>0)=0.390 (460s)
+  cos+ [p5=0.503 p50=0.696 p95=0.823]
+  cos- [p5=-0.381 p50=-0.060 p95=0.302]
+  [ep26] b50 loss=0.023 cos+=0.700 cos-=-0.028 gap=0.728
+  [ep26] b100 loss=0.024 cos+=0.696 cos-=-0.029 gap=0.725
+  [ep26] b150 loss=0.026 cos+=0.691 cos-=-0.029 gap=0.720
+  [ep26] b200 loss=0.025 cos+=0.694 cos-=-0.028 gap=0.722
+  [ep26] b250 loss=0.025 cos+=0.691 cos-=-0.031 gap=0.722
+  [ep26] b300 loss=0.024 cos+=0.692 cos-=-0.030 gap=0.722
+  [ep26] b350 loss=0.024 cos+=0.692 cos-=-0.031 gap=0.723
+  [ep26] b400 loss=0.024 cos+=0.693 cos-=-0.030 gap=0.723
+  [ep26] b450 loss=0.024 cos+=0.695 cos-=-0.030 gap=0.724
+  [ep26] b500 loss=0.023 cos+=0.695 cos-=-0.029 gap=0.725
+  [ep26] b550 loss=0.023 cos+=0.697 cos-=-0.030 gap=0.726
+  [ep26] b600 loss=0.022 cos+=0.698 cos-=-0.031 gap=0.729
+[text ep26] seen=0.8220 unseen=0.7691 loss=0.0224 cos+=0.698±0.10 cos-=-0.031±0.21 overlap(>0)=0.430 (457s)
+  cos+ [p5=0.506 p50=0.714 p95=0.840]
+  cos- [p5=-0.366 p50=-0.038 p95=0.330]
+  [ep27] b50 loss=0.022 cos+=0.699 cos-=-0.045 gap=0.744
+  [ep27] b100 loss=0.019 cos+=0.703 cos-=-0.042 gap=0.744
+  [ep27] b150 loss=0.020 cos+=0.703 cos-=-0.041 gap=0.743
+  [ep27] b200 loss=0.020 cos+=0.705 cos-=-0.038 gap=0.744
+  [ep27] b250 loss=0.019 cos+=0.709 cos-=-0.037 gap=0.746
+  [ep27] b300 loss=0.019 cos+=0.709 cos-=-0.036 gap=0.745
+  [ep27] b350 loss=0.019 cos+=0.708 cos-=-0.036 gap=0.745
+  [ep27] b400 loss=0.019 cos+=0.707 cos-=-0.037 gap=0.744
+  [ep27] b450 loss=0.019 cos+=0.706 cos-=-0.036 gap=0.742
+  [ep27] b500 loss=0.019 cos+=0.705 cos-=-0.036 gap=0.741
+  [ep27] b550 loss=0.020 cos+=0.705 cos-=-0.035 gap=0.740
+  [ep27] b600 loss=0.019 cos+=0.704 cos-=-0.035 gap=0.739
+[text ep27] seen=0.8259 unseen=0.7684 loss=0.0195 cos+=0.704±0.09 cos-=-0.035±0.21 overlap(>0)=0.423 (431s)
+  cos+ [p5=0.519 p50=0.718 p95=0.837]
+  cos- [p5=-0.370 p50=-0.043 p95=0.326]
+  [ep28] b50 loss=0.017 cos+=0.707 cos-=-0.037 gap=0.744
+  [ep28] b100 loss=0.017 cos+=0.704 cos-=-0.037 gap=0.741
+  [ep28] b150 loss=0.017 cos+=0.710 cos-=-0.034 gap=0.744
+  [ep28] b200 loss=0.017 cos+=0.711 cos-=-0.033 gap=0.743
+  [ep28] b250 loss=0.017 cos+=0.711 cos-=-0.034 gap=0.744
+  [ep28] b300 loss=0.017 cos+=0.711 cos-=-0.035 gap=0.746
+  [ep28] b350 loss=0.017 cos+=0.711 cos-=-0.036 gap=0.747
+  [ep28] b400 loss=0.017 cos+=0.712 cos-=-0.036 gap=0.748
+  [ep28] b450 loss=0.017 cos+=0.712 cos-=-0.035 gap=0.747
+  [ep28] b500 loss=0.017 cos+=0.711 cos-=-0.034 gap=0.745
+  [ep28] b550 loss=0.017 cos+=0.710 cos-=-0.033 gap=0.743
+  [ep28] b600 loss=0.018 cos+=0.708 cos-=-0.033 gap=0.741
+[text ep28] seen=0.8290 unseen=0.7736 loss=0.0178 cos+=0.708±0.09 cos-=-0.032±0.21 overlap(>0)=0.430 (433s)
+  cos+ [p5=0.529 p50=0.721 p95=0.843]
+  cos- [p5=-0.368 p50=-0.039 p95=0.326]
+  [ep29] b50 loss=0.017 cos+=0.726 cos-=-0.011 gap=0.737
+  [ep29] b100 loss=0.019 cos+=0.714 cos-=-0.019 gap=0.733
+  [ep29] b150 loss=0.018 cos+=0.712 cos-=-0.020 gap=0.733
+  [ep29] b200 loss=0.018 cos+=0.711 cos-=-0.020 gap=0.731
+  [ep29] b250 loss=0.018 cos+=0.708 cos-=-0.022 gap=0.730
+  [ep29] b300 loss=0.017 cos+=0.708 cos-=-0.023 gap=0.731
+  [ep29] b350 loss=0.017 cos+=0.710 cos-=-0.024 gap=0.734
+  [ep29] b400 loss=0.017 cos+=0.709 cos-=-0.025 gap=0.733
+  [ep29] b450 loss=0.017 cos+=0.707 cos-=-0.024 gap=0.731
+  [ep29] b500 loss=0.018 cos+=0.705 cos-=-0.025 gap=0.730
+  [ep29] b550 loss=0.018 cos+=0.705 cos-=-0.025 gap=0.730
+  [ep29] b600 loss=0.018 cos+=0.705 cos-=-0.025 gap=0.729
+[text ep29] seen=0.8172 unseen=0.7705 loss=0.0180 cos+=0.705±0.09 cos-=-0.025±0.21 overlap(>0)=0.443 (436s)
+  cos+ [p5=0.527 p50=0.718 p95=0.842]
+  cos- [p5=-0.360 p50=-0.031 p95=0.333]
+  [ep30] b50 loss=0.017 cos+=0.709 cos-=-0.020 gap=0.729
+  [ep30] b100 loss=0.019 cos+=0.703 cos-=-0.017 gap=0.720
+  [ep30] b150 loss=0.018 cos+=0.704 cos-=-0.019 gap=0.722
+  [ep30] b200 loss=0.017 cos+=0.703 cos-=-0.022 gap=0.725
+  [ep30] b250 loss=0.017 cos+=0.705 cos-=-0.023 gap=0.728
+  [ep30] b300 loss=0.020 cos+=0.700 cos-=-0.021 gap=0.721
+  [ep30] b350 loss=0.020 cos+=0.699 cos-=-0.017 gap=0.716
+  [ep30] b400 loss=0.019 cos+=0.700 cos-=-0.017 gap=0.716
+  [ep30] b450 loss=0.020 cos+=0.698 cos-=-0.015 gap=0.713
+  [ep30] b500 loss=0.020 cos+=0.697 cos-=-0.015 gap=0.712
+  [ep30] b550 loss=0.020 cos+=0.697 cos-=-0.014 gap=0.711
+  [ep30] b600 loss=0.020 cos+=0.698 cos-=-0.013 gap=0.711
+[text ep30] seen=0.8194 unseen=0.7651 loss=0.0202 cos+=0.698±0.10 cos-=-0.013±0.21 overlap(>0)=0.466 (435s)
+  cos+ [p5=0.511 p50=0.712 p95=0.840]
+  cos- [p5=-0.353 p50=-0.019 p95=0.349]

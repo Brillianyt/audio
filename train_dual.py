@@ -5,6 +5,19 @@
 
 Trains separately, combines at inference.
 No fusion MLP, no multi-task entanglement.
+
+python dual_encoder.py \
+  --mode text \
+  --name at_v8 \
+  --resume \
+  --encoder whisper \       # 可选: wavlm
+  --small-te \              # 加上这个启用轻量64维文本编码器
+  --pk \                    # 加上这个启用 PK 采样策略
+  --epochs 20 \
+  --lr 3e-4 \
+  --bs 256 \
+  --unfreeze 4 \            # 解冻 Whisper 后4层
+  --pos-weight 5.0          # 调整正样本权重
 """
 import argparse, csv, gc, json, math, os, time, io, zipfile, re as _re
 from collections import defaultdict
@@ -34,7 +47,7 @@ class Config:
     pos_weight: float = 5.0
     cos_scale: float = 8.0         # moderate scale — high enough to get sigmoid >0.9 for cos>0.3,
                                    # low enough NOT to kill pos gradient at cos=0.2
-    num_workers: int = 4
+    num_workers: int = 8
     seed: int = 42
     log_every: int = 50
 
@@ -63,6 +76,7 @@ class Config:
         self.eval_unseen_csv = os.path.join(r, "evalcsv_without_label", "eval_unseen_without_label.csv")
 
 
+        
 # ═══════════ Whisper Encoder ═══════════
 
 class WhisperEncoder(nn.Module):
@@ -104,6 +118,20 @@ class WhisperEncoder(nn.Module):
         mel = torch.log10(torch.clamp(mel, min=1e-10))
         mel = torch.maximum(mel, mel.max()-8.0)
         mel = (mel+4.0)/4.0
+
+        # SpecAugment during training: frequency + time masking
+        if self.training:
+            if np.random.rand() < 0.5:
+                f_max = min(10, mel.shape[1] // 4)
+                f = np.random.randint(0, f_max + 1)
+                f0 = np.random.randint(0, mel.shape[1] - f + 1)
+                mel[:, f0:f0+f, :] = 0.0
+            if np.random.rand() < 0.5:
+                t_max = min(50, mel.shape[2] // 4)
+                t = np.random.randint(0, t_max + 1)
+                t0 = np.random.randint(0, mel.shape[2] - t + 1)
+                mel[:, :, t0:t0+t] = 0.0
+
         enc = self.whisper.encoder
         n_valid = max(1, (wav.shape[-1]+319)//320)
         with torch.no_grad():
@@ -127,12 +155,8 @@ class WhisperEncoder(nn.Module):
 
 # ═══════════ Text Encoder (simple GRU) ═══════════
 
-PHONEMES = ["AA","AE","AH","AO","AW","AY","B","CH","D","DH","EH","ER","EY","F","G",
-            "HH","IH","IY","JH","K","L","M","N","NG","OW","OY","P","R","S","SH",
-            "T","TH","UH","UW","V","W","Y","Z","ZH","UNK"]
-P2I = {p:i for i,p in enumerate(PHONEMES)}
 
-_cmu = None
+
 def _load_cmu():
     global _cmu
     if _cmu is None: import cmudict; _cmu = cmudict.dict()
@@ -306,39 +330,9 @@ class AudioTextModel(nn.Module):
 
 # ═══════════ PhonemeBiGRU ═══════════
 
-class PhonemeBiGRUEncoder(nn.Module):
-    """CMU phoneme → BiGRU text encoder."""
-    def __init__(self, dim=256):
-        super().__init__()
-        import cmudict as _cd
-        self.cmu = _cd.dict()
-        self.emb = nn.Embedding(40, dim)
-        self.gru = nn.GRU(dim, dim, batch_first=True, bidirectional=True, num_layers=2, dropout=0.1)
-        self.proj = nn.Linear(dim*2, dim)
-        self.PV = ["AA","AE","AH","AO","AW","AY","B","CH","D","DH","EH","ER","EY","F","G",
-                    "HH","IH","IY","JH","K","L","M","N","NG","OW","OY","P","R","S","SH",
-                    "T","TH","UH","UW","V","W","Y","Z","ZH","UNK"]
-        self.P2I = {p:i for i,p in enumerate(self.PV)}
-
-    def forward(self, texts):
-        import re
-        device = next(self.parameters()).device
-        if not texts: return torch.zeros(0, 256, device=device), None
-        def w2p(w):
-            w = w.lower().strip("'s\"-.,!?;:")
-            if not w: return []
-            pl = self.cmu.get(w)
-            return [re.sub(r'[0-2]$','',p) for p in pl[0]] if pl else []
-        ph_lists = [[self.P2I.get(p,39) for p in w2p(t)] or [39] for t in texts]
-        mx = max(len(p) for p in ph_lists)
-        idx = torch.zeros(len(texts), mx, dtype=torch.long, device=device)
-        for i, ph in enumerate(ph_lists):
-            for j, pid in enumerate(ph[:mx]): idx[i,j] = pid
-        x = self.emb(idx)
-        _, h = self.gru(x)
-        h = torch.cat([h[-2], h[-1]], -1)
-        return F.normalize(self.proj(h), dim=-1), None
-
+"""
+No longer train this model
+"""
 
 # ═══════════ SupCon Loss ═══════════
 
@@ -461,13 +455,6 @@ def train_audio(cfg, args):
 
     all_pairs = load_pairs(cfg.train_csv)
     rng = np.random.default_rng(cfg.seed)
-    for hn in ["baseline/hard_neg_whisper.json", "baseline/hard_neg_iter1.json",
-               "baseline/hard_neg_iter2.json", "baseline/hard_neg_phoneme.json",
-               "train/self_paired.json"]:
-        hp = os.path.join(PATHS.root, hn)
-        if os.path.isfile(hp):
-            with open(hp) as f: all_pairs += json.load(f)
-    rng.shuffle(all_pairs)
     print(f"[audio] {len(all_pairs)} total pairs")
     pos_pairs = [p for p in all_pairs if p["label"] == 1]
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
@@ -508,10 +495,10 @@ def train_audio(cfg, args):
             # If latest.pt AUC is much worse than best.pt, warn but still use latest
             if ckpt_path == latest and os.path.isfile(best_pt):
                 ckpt_best = torch.load(best_pt, map_location=device, weights_only=False)
-                if ckpt_best.get("auc_unseen", -1) > ckpt.get("auc_unseen", -1):
+                if ckpt_best.get("auc_seen", -1) > ckpt.get("auc_seen", -1):
                     print(f"  [resume] note: best.pt AUC={ckpt_best['auc_unseen']:.4f} > latest.pt AUC={ckpt['auc_unseen']:.4f}")
             model.load_state_dict(ckpt["model"], strict=False)
-            best = ckpt.get("auc_unseen", -1.0)
+            best = ckpt.get("auc_seen", -1.0)
             start_ep = ckpt.get("epoch", 0)
             if start_ep == 0: start_ep = 1  # old checkpoints lack epoch
             start_ep += 1
@@ -533,13 +520,15 @@ def train_audio(cfg, args):
         for e, q, y, e_txts, q_txts, _ in loader:
             e, q, y = e.to(device), q.to(device), y.to(device)
 
-            # ── noise augmentation ──
-            snr = np.random.uniform(-10, 5)
-            nl = 10 ** (-snr / 20)
-            e = e + nl * torch.randn_like(e) * e.std(-1, keepdim=True)
-            snr = np.random.uniform(-10, 5)
-            nl = 10 ** (-snr / 20)
-            q = q + nl * torch.randn_like(q) * q.std(-1, keepdim=True)
+            # ── noise augmentation (tiered) ──
+            snr = float(np.random.choice(
+                [np.random.uniform(0, 5), np.random.uniform(-5, 0), np.random.uniform(-10, -5)],
+                p=[0.7, 0.2, 0.1]))
+            e = e + (10**(-snr/20)) * torch.randn_like(e) * e.std(-1, keepdim=True)
+            snr = float(np.random.choice(
+                [np.random.uniform(0, 5), np.random.uniform(-5, 0), np.random.uniform(-10, -5)],
+                p=[0.7, 0.2, 0.1]))
+            q = q + (10**(-snr/20)) * torch.randn_like(q) * q.std(-1, keepdim=True)
 
             # ── encode ──
             ea = model.encoder(e)                            # (B, D)
@@ -634,12 +623,12 @@ def train_audio(cfg, args):
         print(f"  cos- [p5={dist['cos_neg']['p05']:.3f} "
               f"p50={dist['cos_neg']['p50']:.3f} p95={dist['cos_neg']['p95']:.3f}]")
 
-        if au_ > best:
-            best = au_
-            torch.save({"model": model.state_dict(), "auc_unseen": au_,
+        if as_ > best:
+            best = as_
+            torch.save({"model": model.state_dict(), "auc_seen": as_,
                         "auc_seen": as_, "epoch": ep},
                        os.path.join(out_dir, "best.pt"))
-        torch.save({"model": model.state_dict(), "auc_unseen": au_,
+        torch.save({"model": model.state_dict(), "auc_seen": as_,
                     "auc_seen": as_, "epoch": ep},
                    os.path.join(out_dir, "latest.pt"))
 
@@ -655,13 +644,6 @@ def train_text(cfg, args):
 
     all_pairs = load_pairs(cfg.train_csv)
     rng = np.random.default_rng(cfg.seed)
-    for hn in ["baseline/hard_neg_whisper.json", "baseline/hard_neg_iter1.json",
-               "baseline/hard_neg_iter2.json", "baseline/hard_neg_phoneme.json",
-               "train/self_paired.json"]:
-        hp = os.path.join(PATHS.root, hn)
-        if os.path.isfile(hp): all_pairs += json.load(open(hp))
-    rng.shuffle(all_pairs)
-    print(f"[text] {len(all_pairs)} pairs")
     pos_pairs = [p for p in all_pairs if p["label"] == 1]
     neg_pairs = [p for p in all_pairs if p["label"] == 0]
     print(f"  pos={len(pos_pairs)} neg={len(neg_pairs)}")
@@ -747,10 +729,10 @@ def train_text(cfg, args):
             # If latest.pt AUC is much worse than best.pt, warn but still use latest
             if ckpt_path == latest and os.path.isfile(best_pt):
                 ckpt_best = torch.load(best_pt, map_location=device, weights_only=False)
-                if ckpt_best.get("auc_unseen", -1) > ckpt.get("auc_unseen", -1):
+                if ckpt_best.get("auc_seen", -1) > ckpt.get("auc_seen", -1):
                     print(f"  [resume] note: best.pt AUC={ckpt_best['auc_unseen']:.4f} > latest.pt AUC={ckpt['auc_unseen']:.4f}")
             model.load_state_dict(ckpt["model"], strict=False)
-            best = ckpt.get("auc_unseen", -1.0)
+            best = ckpt.get("auc_seen", -1.0)
             start_ep = ckpt.get("epoch", 0)
             if start_ep == 0: start_ep = 1  # old checkpoints lack epoch
             start_ep += 1
@@ -772,10 +754,51 @@ def train_text(cfg, args):
         all_cos_pos, all_cos_neg = [], []
         for e,q,y,txts,_ in loader:
             e,q,y = e.to(device),q.to(device),y.to(device)
-            snr = np.random.uniform(-5,10); nl=10**(-snr/20)
-            e = e+nl*torch.randn_like(e)*e.std(-1,keepdim=True)
-            snr = np.random.uniform(-5,10); nl=10**(-snr/20)
-            q = q+nl*torch.randn_like(q)*q.std(-1,keepdim=True)
+
+            # ── Enhanced augmentation ──
+            def _augment(wav):
+                kind = np.random.choice(['gaussian_light', 'gaussian_med', 'gaussian_heavy',
+                                         'burst', 'lowpass', 'clip'],
+                                        p=[0.20, 0.20, 0.15, 0.15, 0.15, 0.15])
+                B, T = wav.shape
+                wav_out = wav.clone()
+                n_std = wav.std(-1, keepdim=True).clamp(min=1e-6)
+
+                if kind == 'gaussian_light':
+                    snr = float(np.random.uniform(0, 5))
+                    wav_out = wav + (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                elif kind == 'gaussian_med':
+                    snr = float(np.random.uniform(-5, 0))
+                    wav_out = wav + (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                elif kind == 'gaussian_heavy':
+                    snr = float(np.random.uniform(-15, -5))
+                    wav_out = wav + (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                elif kind == 'burst':
+                    snr = float(np.random.uniform(-10, 0))
+                    noise = (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                    for b in range(B):
+                        t_len = int(T * np.random.uniform(0.3, 0.8))
+                        t_start = int(np.random.randint(0, max(1, T - t_len)))
+                        wav_out[b, t_start:t_start+t_len] += noise[b, t_start:t_start+t_len]
+                elif kind == 'lowpass':
+                    cutoff = int(np.random.choice([1000, 2000, 3000, 4000]))
+                    try:
+                        import torchaudio
+                        kernel_size = 16000 // cutoff
+                        if kernel_size > 1 and kernel_size < T:
+                            kernel = torch.ones(1, 1, kernel_size, device=wav.device) / kernel_size
+                            wav_reshaped = wav_out.unsqueeze(1)
+                            wav_filtered = F.conv1d(wav_reshaped, kernel, padding=kernel_size//2)
+                            wav_out = wav_filtered.squeeze(1)
+                    except Exception:
+                        pass
+                elif kind == 'clip':
+                    threshold = float(np.random.uniform(0.1, 0.5))
+                    wav_out = wav_out.clamp(-threshold, threshold)
+                return wav_out
+
+            e = _augment(e)
+            q = _augment(q)
 
             cos_ae, score, ea, et = model(e, txts, q)
             # Online mining: reweight based on current difficulty
@@ -786,6 +809,11 @@ def train_text(cfg, args):
             loss = (loss * weight).mean()
             pos = (y==1); neg = (y==0)
             _cp = cos_ae[pos]; _cn = cos_ae[neg]
+            # FN booster: push low-cosine positives toward 1.0
+            if pos.any():
+                hard_pos = _cp < 0.5
+                if hard_pos.any():
+                    loss = loss + 0.05 * ((1.0 - _cp[hard_pos]) ** 2).mean()
             c_pv = _cp.mean().item() if pos.any() else 0.0
             c_nv = _cn.mean().item() if neg.any() else 0.0
             opt.zero_grad(); loss.backward(); opt.step()
@@ -845,7 +873,7 @@ def train_text(cfg, args):
         print(f"  cos- [p5={dist['cos_neg']['p05']:.3f} p50={dist['cos_neg']['p50']:.3f} p95={dist['cos_neg']['p95']:.3f}]")
 
         if au_>best:
-            best=au_
+            best=as_
             torch.save({"model":model.state_dict(),"auc_unseen":au_,"auc_seen":as_,"epoch":ep},
                        os.path.join(out_dir,"best.pt"))
         torch.save({"model":model.state_dict(),"auc_unseen":au_,"auc_seen":as_,"epoch":ep},
@@ -868,10 +896,12 @@ def main():
     p.add_argument("--small-te", action="store_true", help="use 64d CharBiGRU")
     p.add_argument("--pk", action="store_true", help="use PK sampling (32×4 pos + 128 neg per batch)")
     p.add_argument("--unfreeze", type=int, default=cfg.unfreeze_layers, help="unfreeze layers")
+    p.add_argument("--pos-weight", type=float, default=None, help="positive class weight (overrides config)")
     p.add_argument("--phoneme", action="store_true", help="use PhonemeBiGRU (CMU dict)")
     p.add_argument("--head", action="store_true", help="use comparison head for AT")
     args = p.parse_args()
     cfg.epochs = args.epochs; cfg.lr = args.lr; cfg.batch_size = args.bs; cfg.unfreeze_layers = args.unfreeze
+    if args.pos_weight is not None: cfg.pos_weight = args.pos_weight
 
     if args.mode in ("audio","both"): train_audio(cfg, args)
     if args.mode in ("text","both"): train_text(cfg, args)
@@ -880,24 +910,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-# ═══════════════════════════════════════════════════════════════════
-# 实验结果记录 (2026-07-22)
-#
-# 实验: AT uncertainty fusion (train_dual.py --mode text)
-# 架构: CharBiGRU + uncertainty-weighted audio+text fusion
-# 配置: --unfreeze 0 --epochs 10 --bs 256 --lr 3e-4 (冻结Whisper)
-# 损失: BCE on score = exp(-σ_a)*cos(ea,eq) + exp(-σ_t)*cos(et,eq) + bias
-#
-# 最终效果:
-#    Ep1: seen=0.654 unseen=0.610
-#    Ep4: seen=0.731 unseen=0.700
-#    Ep8: seen=0.761 unseen=0.729
-#   **Ep9: seen=0.767 unseen=0.742 (best)**
-#    Ep10: seen=0.767 unseen=0.741
-#
-# 结论:
-#   - 不确定性融合 > 纯 cosine（音频通道提供 bootstrap 信号）
-#   - 最佳 unseen=0.742，平历史最高水平
-#   - 冻结 Whisper 足够（2.4M 参数训练，不欠拟合）
-#   - cos+ 和 cos- 都偏负是正常的（score 不再纯 cosine）
-# ═══════════════════════════════════════════════════════════════════

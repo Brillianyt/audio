@@ -1,0 +1,27 @@
+Running on dev_seen...
+  [dev_seen] 5000/5000
+AT seen AUC: 0.8462
+Fusion seen AUC: 0.7808
+
+Running on dev_unseen...
+  [dev_unseen] 5000/5000
+AT unseen AUC: 0.7888
+Fusion unseen AUC: 0.6884
+
+Learning ensemble weights on dev_seen...
+Logistic weights: AT=7.5858, Fusion=1.8669, bias=-2.1197
+Ensemble seen AUC: 0.8444
+Ensemble unseen AUC: 0.7827
+
+Grid search:
+Best weight: AT=0.95 Fusion=0.05
+Seen AUC: 0.8471
+Unseen AUC: 0.7891
+
+Running eval set with best ensemble...
+  50000/50000
+  50000/50000
+
+Saved: submission_ensemble.csv
+Total: 100000 rows
+Mean=0.1892 Std=0.1765 >0.5=8647/100000

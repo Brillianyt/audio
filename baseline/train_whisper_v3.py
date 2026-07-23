@@ -96,8 +96,8 @@ class WhisperConfigV3:
     log_every: int = 10            # ↓ (v3: batch 更多，log 频率降低)
     subset: int = 500000
     lambda_proto: float = 1.0        # Angular Prototypical loss weight (model learns multiplier)
-    specaug_freq: int = 10          # 保守: 验证任务不可破坏共振峰
-    specaug_time: int = 50
+    specaug_freq: int = 5          # 保守: 验证任务不可破坏共振峰
+    specaug_time: int = 20
     noise_aug: bool = False
     unfreeze_layers: int = 2        # 少改 Whisper → 保留预训练通用特征
     max_audio_sec: float = 3.0
@@ -864,8 +864,8 @@ def train(args, cfg: WhisperConfigV3):
         ).to(device)
         model.load_state_dict(ckpt["model"], strict=False)
         resume_ep = ckpt.get("step", (0, 0))[0]
-        best = ckpt.get("auc", 0.0)
-        print(f"[model] resumed from {latest_path} (epoch {resume_ep}, AUC={best:.4f})")
+        best_unseen = ckpt.get("auc", 0.0)
+        print(f"[model] resumed from {latest_path} (epoch {resume_ep}, AUC={best_unseen:.4f})")
     else:
         model = MultiTaskWhisperKWSV3(
             cfg.whisper_model, cfg.embed_dim,
@@ -917,6 +917,62 @@ def train(args, cfg: WhisperConfigV3):
         for it, (e, q, y, w_e_list, w_q_list, _) in enumerate(train_loader, 1):
             e, q, y = e.to(device), q.to(device), y.to(device)
 
+                        # Diverse noise augmentation
+            def _augment(wav):
+                kind = np.random.choice(
+                    ['gauss_light','gauss_med','gauss_heavy','burst','lowpass','clip','tail','babble'],
+                    p=[0.15,0.15,0.10,0.12,0.10,0.10,0.13,0.15])
+                B, T = wav.shape
+                wav_out = wav.clone()
+                n_std = wav.std(-1, keepdim=True).clamp(min=1e-6)
+                if kind == 'gauss_light':
+                    snr = float(np.random.uniform(0, 5))
+                    wav_out = wav + (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                elif kind == 'gauss_med':
+                    snr = float(np.random.uniform(-5, 0))
+                    wav_out = wav + (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                elif kind == 'gauss_heavy':
+                    snr = float(np.random.uniform(-15, -5))
+                    wav_out = wav + (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                elif kind == 'burst':
+                    snr = float(np.random.uniform(-10, 0))
+                    noise = (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                    for b in range(B):
+                        t_len = int(T * np.random.uniform(0.3, 0.8))
+                        t_start = int(np.random.randint(0, max(1, T - t_len)))
+                        wav_out[b, t_start:t_start+t_len] += noise[b, t_start:t_start+t_len]
+                elif kind == 'lowpass':
+                    cutoff = int(np.random.choice([1000, 2000, 3000, 4000]))
+                    try:
+                        ks = 16000 // cutoff
+                        if 1 < ks < T:
+                            kernel = torch.ones(1, 1, ks, device=wav.device) / ks
+                            wav_out = F.conv1d(wav_out.unsqueeze(1), kernel, padding=ks//2).squeeze(1)
+                    except: pass
+                elif kind == 'clip':
+                    th = float(np.random.uniform(0.1, 0.5))
+                    wav_out = wav_out.clamp(-th, th)
+                elif kind == 'tail':
+                    snr = float(np.random.uniform(-10, 5))
+                    noise = (10**(-snr/20)) * torch.randn_like(wav) * n_std
+                    tr = float(np.random.uniform(0.2, 0.5))
+                    wav_out[:, int(T*(1-tr)):] += noise[:, int(T*(1-tr)):]
+                elif kind == 'babble':
+                    if B > 1:
+                        other_idx = torch.randperm(B, device=wav.device)
+                        other = wav[other_idx[0]].unsqueeze(0)
+                        snr = float(np.random.uniform(-8, 3))
+                        wav_out += (10**(-snr/20)) * other / other.std().clamp(min=1e-6) * n_std
+                    else:
+                        t = torch.arange(T, device=wav.device).float()
+                        mod = 0.5 + 0.5 * torch.sin(2*np.pi*t/16000*np.random.uniform(3,8))
+                        snr = float(np.random.uniform(-5, 5))
+                        wav_out += (10**(-snr/20)) * torch.randn_like(wav) * n_std * mod.unsqueeze(0)
+                return wav_out
+
+            e = _augment(e)
+            q = _augment(q)
+
             with torch.amp.autocast("cuda", enabled=(device == "cuda")):
                 logit, e_emb, q_emb = model(e, q)
                 loss_bce = F.binary_cross_entropy_with_logits(logit, y, reduction="none")
@@ -960,7 +1016,7 @@ def train(args, cfg: WhisperConfigV3):
                     "model": model.state_dict(),
                     "embed_dim": cfg.embed_dim,
                     "whisper_model": cfg.whisper_model,
-                    "step": (ep, it), "auc": best,
+                    "step": (ep, it), "auc": best_unseen,
                 }, os.path.join(output_dir, "latest.pt"))
                 torch.cuda.empty_cache()
 
@@ -976,7 +1032,7 @@ def train(args, cfg: WhisperConfigV3):
             "model": model.state_dict(),
             "embed_dim": cfg.embed_dim,
             "whisper_model": cfg.whisper_model,
-            "auc": best,
+            "auc": best_unseen,
         }, os.path.join(output_dir, "latest.pt"))
 
         gc.collect()
@@ -998,19 +1054,19 @@ def train(args, cfg: WhisperConfigV3):
               f"mean={mean_auc:.4f} steps={n_opt} "
               f"({time.time() - t_ep:.0f}s)")
 
-        if mean_auc > best:
-            best = mean_auc
+        if mean_auc > best_unseen:
+            best_unseen = mean_auc
             best_ep = ep
             torch.save({
                 "model": model.state_dict(),
                 "embed_dim": cfg.embed_dim,
                 "whisper_model": cfg.whisper_model,
-                "auc": best,
+                "auc": best_unseen,
             }, os.path.join(output_dir, "best.pt"))
-            print(f"  [ckpt] saved (AUC={best:.4f})")
+            print(f"  [ckpt] saved (AUC={best_unseen:.4f})")
 
     t_total = time.time() - t_start
-    print(f"\n[done] best AUC={best:.4f} (epoch {best_ep}), {t_total:.0f}s")
+    print(f"\n[done] best AUC={best_unseen:.4f} (epoch {best_ep}), {t_total:.0f}s")
 
     # 保存实验记录
     records = {
@@ -1028,7 +1084,7 @@ def train(args, cfg: WhisperConfigV3):
         "total_opt_steps": global_step,
         "auc_seen": round(auc_s, 4),
         "auc_unseen": round(auc_u, 4),
-        "auc_mean": round(best, 4),
+        "auc_mean": round(best_unseen, 4),
         "best_epoch": best_ep,
         "duration": round(t_total, 1),
     }

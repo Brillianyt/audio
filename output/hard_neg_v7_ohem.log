@@ -1,0 +1,50 @@
+Loading AT from output/dual_at_v7_text/best.pt...
+  seen=0.7917 unseen=0.7608
+Original pairs: 500000
+Sampled: 200000
+  batch 50: FP=0 FN=343
+  batch 100: FP=1 FN=675
+  batch 150: FP=1 FN=998
+  batch 200: FP=2 FN=1306
+  batch 250: FP=2 FN=1612
+  batch 300: FP=3 FN=1910
+  batch 350: FP=4 FN=2245
+  batch 400: FP=5 FN=2569
+  batch 450: FP=6 FN=2902
+  batch 500: FP=7 FN=3188
+  batch 550: FP=8 FN=3478
+  batch 600: FP=9 FN=3768
+  batch 650: FP=12 FN=4087
+  batch 700: FP=14 FN=4387
+  batch 750: FP=15 FN=4706
+
+Results:
+  False positives (label=0, score>0.7): 16
+  False negatives (label=1, score<0.3): 4893
+  Unique word pairs: 346
+
+Sample FPs (model thinks match, but they don't):
+  enables            <-> library             score=0.782
+  edition            <-> destitute           score=0.772
+  stealing           <-> sending             score=0.716
+  overwhelming       <-> debating            score=0.848
+  organiser          <-> watkins's           score=0.755
+  overwhelmed        <-> arizona             score=0.727
+  adopted            <-> apologised          score=0.841
+  adopted            <-> apologised          score=0.717
+  overwhelming       <-> debating            score=0.762
+  questions          <-> plants              score=0.796
+
+Sample FNs (model thinks don't match, but they do):
+  similar            <-> similar             score=0.289
+  wouldn't           <-> wouldn't            score=0.153
+  whereas            <-> whereas             score=0.251
+  students           <-> students            score=0.195
+  combined           <-> combined            score=0.198
+  already            <-> already             score=0.000
+  problem            <-> problem             score=0.178
+  problem            <-> problem             score=0.279
+  imagine            <-> imagine             score=0.127
+  immediately        <-> immediately         score=0.048
+
+Saved 346 pairs → baseline/hard_neg_at_v7_ohem.json
