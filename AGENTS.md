@@ -468,11 +468,97 @@ AA 对 seen 词自信，AT 对 unseen 自信。各自不自信时对方的权重
 
 
 
-## 后续计划（目标 dev AUC 0.9）
+## 实验总结 (2026-07-23)
 
-由于目前的最佳模型AT V8，对于text  与 音损正常的 query audio之间的判断是较为可信的，然而若音损过度则难以分辨到底是真不一样还是假不一样，需要AA参与辅助判断，如何设计一种更好的模型依赖判断逻辑是值得思考的事情。
+### 最终结论
+
+| 模型 | Dev Seen AUC | 说明 |
+|------|-------------|------|
+| **AT v8 ep29** | **0.8462** | 单模型最佳，线上 0.84 |
+| **LightGBM Stacker (AT+Fusion+AA)** | **0.8466** | 概率级 Stacking，泛化最稳 |
+| Fusion v2 ep9 | 0.8379 | Cross-attention 融合，冻结编码器 |
+| Fusion v3 (pos_enc + frame_proj) | 0.8125 | 位置编码 + 帧投影可训，冻结编码器 |
+| AA v3 | 0.7934 | 纯声学匹配基线 |
+
+### 关键发现
+
+#### 1. 数据质量决定了模型上限
+- **Dev Unseen 集标注错误**：CSV 中的 `enroll_txt` 字段与 enroll 音频实际内容不匹配（90%+ 样本有偏差）。导致所有基于 unseen 的评估不可信。
+- **模型最后都收敛在 0.83-0.84**：不同架构（AT/Fusion/AA）、不同参数量（1M/15M/22M），最终 Seen AUC 都卡在 0.83-0.84，说明 50 万对训练数据的信息量已经用尽。
+
+#### 2. AT 内部已内置 AA 融合
+AT v8 的 `AudioTextModel` 内部通过 `log_var_a` / `log_var_t` 实现**不确定性融合**：
+- `w_t = 5.02`（文本匹配权重），`w_a = 1.27`（声学匹配权重）
+- 文本比声学可靠 4 倍，但保留了声学分支作为补充
+- 解释了为什么额外加 AA 模型做集成没有提升——AT 已经自己做了
+
+#### 3. 集成学习效果有限
+- **简单加权（AT=0.95, Fusion=0.05）**：0.8471（最好）
+- **LightGBM Stacking**：0.8466
+- **MLP Stacker（加噪声）**：0.8424
+- **Embedding 级 MLP（SuperStacker）**：0.8275（过拟合）
+- 三个模型都在同一份数据上训练，错误模式高度重合，集成收益甚微
+
+#### 4. 树模型 > 神经网络（概率级 Stacking）
+- LightGBM 的条件规则（If-else）比 MLP 更适合处理"少数派正确"场景
+- `max_p`, `min_p`, `median_p`, `max_p - median_p` 等极值特征让树模型能学习"当多数派低置信但少数派高置信时信任少数派"
+- 特征重要性：`logit_at` > `at_p` > `at_fu` > `min_p`
+
+#### 5. 噪声多样性 > 理想噪声强度
+- 训练时加多样噪声（burst/lowpass/clip/tail/babble）比固定 SNR 范围更有效
+- Seen AUC 从 0.8187（无增强）提升到 0.8462（多噪声 + SpecAugment）
+- 但过强的噪声（如 -15dB 高斯 + 裁剪）会损害模型稳定性
+
+#### 6. 编码器冻结 vs 微调
+- **冻结编码器**训练交叉注意力 + MLP（Fusion v2）：0.8379，稳定且快速
+- **全参数微调**（Fusion v4）：22M 参数，反而下降到 0.78-0.81
+- 在数据量有限时，冻结预训练编码器 + 只训练新加模块是最稳健的策略
+
+#### 7. Dev Unseen 数据不可信
+- dev_unseen_label.csv 的 `enroll_txt` 与音频实际内容不一致（如 CSV 写 "bombshell" 但音频说的是 "opportunities"）
+- 两个 zip 的 enroll 文件完全相同（5000/5000 文件 MD5 一致）
+- 所有基于 dev_unseen 的 AUC 评估都不可靠，只以 dev_seen 和线上结果为准
+
+### 尝试过的方向
+
+| 方向 | 状态 | 结论 |
+|------|------|------|
+| AT v8（BCE + 不确定性融合） | ✅ 最佳 | 简单线性融合在这份数据上最优 |
+| SpecAugment + 多噪声增强 | ✅ 有效 | Seen +0.0275 |
+| 在线交叉配对负样本 | ✅ 有效 | 比 CSV 预设负样本好 |
+| CatBoost / LightGBM Stacking | ✅ 最佳 Stacking | 树模型优于 MLP |
+| Embedding 级融合 | ❌ 过拟合 | 100K 数据不够训 772 维 MLP |
+| Cross-attention 融合（Fusion） | ❌ 不如 AT | 复杂架构不如简单加权 |
+| 全参数微调 | ❌ 不稳定 | 冻结编码器更可靠 |
+| Mel 质量路由 | ❌ 无提升 | 损伤度量与模型擅长场景不匹配 |
+| 置信度路由 | ❌ 无提升 | AA 输出饱和，无法作为 fallback |
+| 多噪声强化 AA 训练 | ❌ 未完成 | 中途停止 |
+| 解冻更多层（unfreeze=6） | ❌ 不稳定 | 4 层最优 |
+| K-fold 交叉验证 | ❌ 未实施 | 性价比不高 |
+
+### 文件清单
+
+| 文件 | 说明 |
+|------|------|
+| `train_dual.py` | AT v8 训练脚本（BCE + 不确定性融合） |
+| `train_fusion.py` | 交叉注意力融合模型训练脚本 |
+| `baseline/train_whisper_v3.py` | Whisper v3 基线（含 Angular Prototypical Loss） |
+| `audio_quality.py` | Mel 音频损伤度量（路由用，未采用） |
+| `infer_routed.py` | 路由推理脚本（实验性） |
+| `infer_ensemble.py` | 集成推理（AT+Fusion 加权） |
+| `stack_ensemble.py` | LightGBM/CatBoost Stacking |
+| `stack_embedding.py` | Embedding 级 MLP Stacking（实验性） |
+| `lgb_submit.py` | LightGBM 提交脚本 |
+| `output/dual_at_v8_text/` | AT v8 训练输出 |
+| `output/fusion_v2/` | Fusion v2 最佳模型 (seen=0.8379) |
+| `output/backup_final/` | 最佳 checkpoint 备份 |
+| `submission_lgb.csv` | LightGBM 集成提交文件 |
+| `submission_ep29.csv` | AT v8 ep29 提交文件 |
+
+### 参考文献
 
 - Khosla et al., "Supervised Contrastive Learning", NeurIPS 2020
 - Chung et al., "In Defence of Metric Learning for Speaker Recognition", Interspeech 2020
 - Chen et al., "WavLM: Large-Scale Self-Supervised Pre-Training", 2021
 - Wan et al., "Generalized End-to-End Loss for Speaker Verification", ICASSP 2018
+
