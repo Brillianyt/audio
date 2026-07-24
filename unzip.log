@@ -1,5 +1,0 @@
-nohup: ignoring input
-Archive:  train.zip
-   creating: train/
-  inflating: train/train_label.csv   
-  inflating: train/wav.zip           

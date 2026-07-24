@@ -216,8 +216,16 @@ class WavLMEncoder(nn.Module):
     def __init__(self, embed_dim=256, unfreeze=2, max_sec=1.5):
         super().__init__()
         from transformers import WavLMModel
-        path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "wavlm"))
-        self.wavlm = WavLMModel.from_pretrained(path, local_files_only=True)
+        wavlm_candidates = [
+            os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub",
+                        "models--microsoft--wavlm-base-plus",
+                        "snapshots", "4c66d4806a428f2e922ccfa1a962776e232d487b"),
+            os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub",
+                        "models--microsoft--wavlm-base-plus",
+                        "snapshots", "98fd61b9c652129c839c0a25a05987d8f59256a4"),
+        ]
+        wavlm_path = next((p for p in wavlm_candidates if os.path.isdir(p)), "microsoft/wavlm-base-plus")
+        self.wavlm = WavLMModel.from_pretrained(wavlm_path, local_files_only=(wavlm_path != "microsoft/wavlm-base-plus"))
         self.wavlm.eval()
         self.dim = self.wavlm.config.hidden_size
         self.max_sec = max_sec
@@ -254,6 +262,54 @@ class WavLMEncoder(nn.Module):
     def sample_rate(self): return 16000
 
 
+class HubertEncoder(nn.Module):
+    """HuBERT base encoder."""
+    def __init__(self, embed_dim=256, unfreeze=2, max_sec=1.5):
+        super().__init__()
+        from transformers import HubertModel
+        candidates = [
+            os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub",
+                        "models--facebook--hubert-base-ls960",
+                        "snapshots", "af46f65f540dc3ca7aa59f46c6c3d5dbb4374fa8"),
+        ]
+        model_path = next((p for p in candidates if os.path.isdir(p)), "facebook/hubert-base-ls960")
+        self.hubert = HubertModel.from_pretrained(model_path, local_files_only=(model_path != "facebook/hubert-base-ls960"))
+        self.hubert.eval()
+        self.dim = self.hubert.config.hidden_size
+        self.max_sec = max_sec
+        for p in self.hubert.feature_extractor.parameters(): p.requires_grad = False
+        total = len(self.hubert.encoder.layers)
+        self.frozen = total - unfreeze
+        for p in self.hubert.encoder.parameters(): p.requires_grad = False
+        for i in range(self.frozen, total):
+            for p in self.hubert.encoder.layers[i].parameters(): p.requires_grad = True
+        self.attn_linear = nn.Linear(self.dim, self.dim//4)
+        self.attn_w = nn.Parameter(torch.randn(self.dim//4, 1))
+        self.proj = nn.Linear(self.dim*2, embed_dim)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode:
+            self.hubert.feature_extractor.eval()
+            for i in range(self.frozen): self.hubert.encoder.layers[i].eval()
+        return self
+
+    def forward(self, wav):
+        device = next(self.hubert.parameters()).device
+        ms = int(self.max_sec * 16000)
+        if wav.shape[-1] > ms: wav = wav[:, :ms]
+        wav = wav.to(device)
+        out = self.hubert(wav, output_hidden_states=False, return_dict=True)
+        x = out.last_hidden_state
+        h = torch.tanh(self.attn_linear(x))
+        aw = F.softmax(h @ self.attn_w, dim=1)
+        mu = (x*aw).sum(1); sg = ((x**2*aw).sum(1)-mu**2).clamp(1e-5).sqrt()
+        return F.normalize(self.proj(torch.cat([mu,sg],-1)), dim=-1)
+
+    @property
+    def sample_rate(self): return 16000
+
+
 # ═══════════ Model A: Audio-Audio ═══════════
 
 class AudioAudioModel(nn.Module):
@@ -261,8 +317,10 @@ class AudioAudioModel(nn.Module):
         super().__init__()
         if encoder == "wavlm":
             self.encoder = WavLMEncoder(embed_dim, unfreeze)
+        elif encoder == "hubert":
+            self.encoder = HubertEncoder(embed_dim, unfreeze)
         else:
-            self.encoder = WhisperEncoder("base", embed_dim, unfreeze)
+            self.encoder = WhisperEncoder(whisper_model, embed_dim, unfreeze)
             if ckpt_path and os.path.isfile(ckpt_path):
                 ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
                 enc_state = {k.replace("encoder.",""): v for k,v in ckpt["model"].items()
@@ -290,9 +348,12 @@ class AudioAudioModel(nn.Module):
 # ═══════════ Model B: Audio-Text ═══════════
 
 class AudioTextModel(nn.Module):
-    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False, use_phoneme=False):
+    def __init__(self, ckpt_path, embed_dim=256, unfreeze=2, small_te=False, use_phoneme=False, whisper_model="base", encoder="whisper"):
         super().__init__()
-        self.encoder = WhisperEncoder("base", embed_dim, unfreeze)
+        if encoder == "wavlm":
+            self.encoder = WavLMEncoder(embed_dim, unfreeze)
+        else:
+            self.encoder = WhisperEncoder(whisper_model, embed_dim, unfreeze)
         if use_phoneme:
             self.text_enc = PhonemeBiGRUEncoder(embed_dim)
         elif small_te:
@@ -716,7 +777,7 @@ def train_text(cfg, args):
     dv_u = dev_ld(cfg.dev_unseen_zip, cfg.dev_unseen_csv)
 
     uf = 0 if args.small_te else cfg.unfreeze_layers
-    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te, use_phoneme=args.phoneme).to(device)
+    model = AudioTextModel(args.load_ckpt, cfg.embed_dim, unfreeze=uf, small_te=args.small_te, use_phoneme=args.phoneme, whisper_model=args.whisper, encoder=args.encoder).to(device)
     best, start_ep = -1.0, 1
     if args.resume:
         latest = os.path.join(out_dir, "latest.pt")
@@ -892,7 +953,8 @@ def main():
     p.add_argument("--lr", type=float, default=cfg.lr)
     p.add_argument("--bs", type=int, default=cfg.batch_size)
     p.add_argument("--resume", action="store_true")
-    p.add_argument("--encoder", default="whisper", choices=["whisper","wavlm"])
+    p.add_argument("--whisper", default="base", help="whisper model size (base/small/medium/large)")
+    p.add_argument("--encoder", default="whisper", choices=["whisper","wavlm","hubert"])
     p.add_argument("--small-te", action="store_true", help="use 64d CharBiGRU")
     p.add_argument("--pk", action="store_true", help="use PK sampling (32×4 pos + 128 neg per batch)")
     p.add_argument("--unfreeze", type=int, default=cfg.unfreeze_layers, help="unfreeze layers")

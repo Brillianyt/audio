@@ -1,4 +1,0 @@
-  [whisper] frozen=96, trainable=0 (blocks 0-5 frozen, 6-5 train)
-Train: 100000 pairs (50000 pos, 50000 neg)
-
-Getting train probs (with noise)...
